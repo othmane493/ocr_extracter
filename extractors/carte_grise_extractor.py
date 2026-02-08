@@ -2,7 +2,6 @@
 Extracteur pour les cartes grises marocaines (Recto et Verso)
 Intègre le code d'extraction existant
 """
-
 import time
 import re
 import difflib
@@ -13,14 +12,22 @@ import pytesseract
 import cv2
 import easyocr
 
+# Import du transformateur JSON
+try:
+    from json_transformer import transform_json
+except ImportError:
+    # Fallback si le module n'est pas trouvé
+    def transform_json(data):
+        return data
+
 
 class CarteGriseExtractor:
     """Classe pour l'extraction de données des cartes grises"""
-    
+
     # Configuration commune
     THRESHOLD_EASYOCR = 0.60
     MAX_ITEMS_EASY_OCR = 10
-    
+
     # Configuration Recto
     FIELDS_KEY_RECTO = {
         "registration_number": {
@@ -69,14 +76,14 @@ class CarteGriseExtractor:
             "multi_line": False
         }
     }
-    
+
     CONF_RECTO = {
         "FIELDS_KEY": FIELDS_KEY_RECTO,
         "DELETE_LINES_BEFORE_Y": 200,
         "DELETE_LINES_AFTER_Y": 900,
         "SPACES_COUNT": 2
     }
-    
+
     # Configuration Verso
     FIELDS_KEY_VERSO = {
         "Marque": {
@@ -146,20 +153,20 @@ class CarteGriseExtractor:
             "multi_line": False
         }
     }
-    
+
     CONF_VERSO = {
         "FIELDS_KEY": FIELDS_KEY_VERSO,
         "DELETE_LINES_BEFORE_Y": 1,
         "DELETE_LINES_AFTER_Y": 950,
         "SPACES_COUNT": 1.8
     }
-    
+
     def __init__(self):
         """Initialise l'extracteur de carte grise"""
         print("Initialisation de l'extracteur de carte grise")
         self.reader = None
         self.config = None
-    
+
     def _init_easyocr(self):
         """Initialise le modèle EasyOCR une seule fois"""
         if self.reader is None:
@@ -168,18 +175,18 @@ class CarteGriseExtractor:
             self.reader = easyocr.Reader(["en", "ar"], gpu=False)
             elapsed = time.time() - start
             print(f"Modèle EasyOCR chargé en {elapsed:.2f}s")
-    
+
     def detect_config_by_fr_fields(self, merged_lines, min_fields=3, threshold=0.6):
         """Détecte automatiquement si c'est un recto ou verso"""
         recto_found = set()
         verso_found = set()
-        
+
         for line in merged_lines:
             for block in line:
                 text = block.get("text", "")
                 if not text:
                     continue
-                
+
                 # Check RECTO
                 for field_name, field in self.CONF_RECTO["FIELDS_KEY"].items():
                     if field_name not in recto_found:
@@ -188,7 +195,7 @@ class CarteGriseExtractor:
                             if len(recto_found) >= min_fields:
                                 print(f"Détection automatique: RECTO ({len(recto_found)} champs trouvés)")
                                 return self.CONF_RECTO
-                
+
                 # Check VERSO
                 for field_name, field in self.CONF_VERSO["FIELDS_KEY"].items():
                     if field_name not in verso_found:
@@ -197,23 +204,23 @@ class CarteGriseExtractor:
                             if len(verso_found) >= min_fields:
                                 print(f"Détection automatique: VERSO ({len(verso_found)} champs trouvés)")
                                 return self.CONF_VERSO
-        
+
         # Par défaut, on retourne RECTO
         print("Détection automatique: RECTO (par défaut)")
         return self.CONF_RECTO
-    
+
     @staticmethod
     def preprocess_image(image_path):
         """Prétraite l'image pour améliorer la qualité OCR"""
         image_original = cv2.imread(image_path)
         if image_original is None:
             raise ValueError(f"Impossible de charger l'image: {image_path}")
-        
+
         gray = cv2.cvtColor(image_original, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 148, 253, cv2.THRESH_BINARY_INV)
-        
+
         return thresh, image_original
-    
+
     @staticmethod
     def extract_text(image):
         """Utilise Tesseract pour extraire le texte"""
@@ -223,11 +230,11 @@ class CarteGriseExtractor:
             config=custom_config,
             output_type=pytesseract.Output.DATAFRAME
         )
-        
+
         # Nettoyage
         data = data.dropna(subset=["text"])
         data = data[data.text.str.strip() != ""]
-        
+
         words = []
         for _, row in data.iterrows():
             words.append({
@@ -238,9 +245,9 @@ class CarteGriseExtractor:
                 "height": int(row["height"]),
                 "confidence": int(row["conf"])
             })
-        
+
         return words
-    
+
     @staticmethod
     def clean_invisible_chars(text):
         """Nettoie les caractères invisibles"""
@@ -250,7 +257,7 @@ class CarteGriseExtractor:
             ch for ch in text
             if unicodedata.category(ch) != "Cf"
         ).strip()
-    
+
     @staticmethod
     def compute_dynamic_y_tolerance(blocks, ratio=0.5, min_tol=6, max_tol=30):
         """Calcule la tolérance Y dynamique pour le groupement de lignes"""
@@ -260,64 +267,64 @@ class CarteGriseExtractor:
         avg_height = sum(heights) / len(heights)
         y_tol = int(avg_height * ratio)
         return max(min_tol, min(y_tol, max_tol))
-    
+
     @staticmethod
     def y_center(b):
         """Retourne le centre vertical d'un bloc"""
         return b["y"] + b["height"] / 2
-    
+
     def group_blocks_by_line(self, blocks, y_tolerance):
         """Groupe les blocs par ligne"""
         blocks = sorted(blocks, key=lambda b: self.y_center(b))
-        
+
         lines = []
         for block in blocks:
             placed = False
             block["text"] = self.clean_invisible_chars(block["text"])
             block["confidence"] = block["confidence"] / 100
             b_center = self.y_center(block)
-            
+
             for line in lines:
                 line_centers = [self.y_center(b) for b in line]
                 avg_center = sum(line_centers) / len(line_centers)
-                
+
                 if abs(b_center - avg_center) <= y_tolerance:
                     line.append(block)
                     placed = True
                     break
-            
+
             if not placed:
                 lines.append([block])
-        
+
         # Trier chaque ligne horizontalement
         for line in lines:
             line.sort(key=lambda b: b["x"])
-        
+
         return lines
-    
+
     @staticmethod
     def is_arabic(text):
         """Vérifie si le texte contient de l'arabe"""
         if not isinstance(text, str):
             return False
         return bool(re.search(r'[\u0600-\u06FF]', text))
-    
+
     def merge_blocks_line_by_gap(self, line):
         """Fusionne les blocs d'une ligne selon les espaces"""
         if not line:
             return []
-        
+
         spaces_count = self.config["SPACES_COUNT"]
         line = sorted(line, key=lambda b: b["x"])
-        
+
         total_width = sum(b["width"] for b in line)
         total_chars = sum(len(b["text"].strip()) for b in line if len(b["text"].strip()) > 0)
         avg_char_width = total_width / total_chars if total_chars > 0 else 5
         x_merge_gap = spaces_count * avg_char_width
-        
+
         merged_line = []
         current = line[0].copy()
-        
+
         for b in line[1:]:
             gap = b["x"] - (current["x"] + current["width"])
             if gap <= x_merge_gap:
@@ -331,102 +338,102 @@ class CarteGriseExtractor:
             else:
                 merged_line.append(current)
                 current = b.copy()
-        
+
         merged_line.append(current)
         return merged_line
-    
+
     def get_best_field_match(self, text, fields, lang, threshold=0.6):
         """Retourne le champ qui correspond le mieux au texte"""
         best_match = None
         best_ratio = 0.0
-        
+
         for field_name, labels in fields.items():
             label = labels.get(lang, "")
             ratio = SequenceMatcher(None, text, label).ratio()
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_match = field_name
-        
+
         if best_ratio >= threshold:
             return best_match
         return None
-    
+
     def mark_fields_in_blocks(self, merged_lines, fields, threshold=0.6):
         """Marque les blocs qui correspondent à des champs"""
         for line in merged_lines:
             cut_from = None
             cut_to = None
-            
+
             for idy, block in enumerate(line):
                 lang = "fr"
                 field_name = self.get_best_field_match(block["text"], fields, lang, threshold)
-                
+
                 if field_name is None:
                     lang = "ar"
                     field_name = self.get_best_field_match(block["text"], fields, lang, threshold)
-                
+
                 if field_name:
                     block["text"] = fields[field_name][lang]
                     block["is_key"] = True
                     block["field_name"] = field_name
                     block["langage"] = lang
                     block["confidence"] = 0.9
-                    
+
                     if self.is_arabic(block["text"]):
                         cut_from = idy + 1
                     else:
                         cut_to = idy
-                    
+
                     break
                 else:
                     block["is_key"] = False
-            
+
             # Nettoyage après la boucle
             if cut_from is not None:
                 del line[cut_from:]
-            
+
             if cut_to is not None:
                 del line[:cut_to]
-        
+
         return merged_lines
-    
+
     @staticmethod
     def has_meaningful_char(text):
         """Vérifie si le texte contient des caractères significatifs"""
         return bool(re.search(r"[A-Za-z0-9\u0600-\u06FF]", text))
-    
+
     def filter_lines(self, merged_lines):
         """Filtre les lignes selon la configuration"""
         y_min = self.config["DELETE_LINES_BEFORE_Y"]
         y_max = self.config["DELETE_LINES_AFTER_Y"]
-        
+
         filtered_lines = []
-        
+
         for line in merged_lines:
             if not line:
                 continue
-            
+
             if not (y_min <= line[0]["y"] <= y_max):
                 continue
-            
+
             cleaned_line = []
             for block in line:
                 text = block.get("text", "").strip()
-                
+
                 if block.get("is_key", False):
                     cleaned_line.append(block)
                     continue
-                
+
                 if not self.has_meaningful_char(text):
                     continue
-                
+
                 cleaned_line.append(block)
-            
+
             if cleaned_line:
                 filtered_lines.append(cleaned_line)
-        
+
         return filtered_lines
-    
+
     def is_field_key_similar(self, text, ratio=0.65):
         """Vérifie si le texte est similaire à une clé de champ"""
         for field_key in self.config["FIELDS_KEY"].values():
@@ -434,109 +441,109 @@ class CarteGriseExtractor:
                difflib.SequenceMatcher(None, field_key["ar"], text).ratio() >= ratio:
                 return True
         return False
-    
+
     def get_safe_block_xy(self, line_idx, block_idx, lines, img_w, img_h):
         """Étend le bloc pour améliorer l'OCR"""
         block = lines[line_idx][block_idx]
-        
+
         # Safe Y (vertical)
         block_y = int(block["y"])
         block_h = int(block["height"])
         block_y_max = block_y + block_h
-        
+
         if line_idx > 0:
             prev_line = lines[line_idx - 1]
             y_prev_max = max(int(b["y"] + b["height"]) for b in prev_line)
         else:
             y_prev_max = 0
-        
+
         if line_idx < len(lines) - 1:
             next_line = lines[line_idx + 1]
             y_next_min = min(int(b["y"]) for b in next_line)
         else:
             y_next_min = img_h - 10
-        
+
         y_safe = min(block_y, y_prev_max)
         y_bottom = max(block_y_max, y_next_min)
         y_safe = max(0, y_safe)
         y_bottom = min(img_h, y_bottom)
         h_safe = max(1, y_bottom - y_safe)
-        
+
         # Safe X (horizontal)
         line = lines[line_idx]
         block_x = int(block["x"])
         block_w = int(block["width"])
         block_x_max = block_x + block_w
-        
+
         if block_idx > 0:
             prev_block = line[block_idx - 1]
             x_prev_max = int(prev_block["x"] + prev_block["width"])
         else:
             x_prev_max = 0
-        
+
         if block_idx < len(line) - 1:
             next_block = line[block_idx + 1]
             x_next_min = int(next_block["x"])
         else:
             x_next_min = img_w
-        
+
         x_safe = min(block_x, x_prev_max)
         x_right = max(block_x_max, x_next_min)
         x_safe = max(0, x_safe)
         x_right = min(img_w, x_right)
         w_safe = max(1, x_right - x_safe)
-        
+
         return x_safe, y_safe, w_safe, h_safe
-    
+
     def correct_suspicious_blocks(self, img, lines, max_item):
         """Corrige les blocs suspects avec EasyOCR"""
         self._init_easyocr()
-        
+
         img_h, img_w = img.shape[:2]
         y_min = self.config["DELETE_LINES_BEFORE_Y"]
         y_max = self.config["DELETE_LINES_AFTER_Y"]
         counter_item = 0
-        
+
         for line_idx, line in enumerate(lines):
             if y_min < line[0]["y"] < y_max:
                 for block_idx, block in enumerate(line):
                     if counter_item >= max_item:
                         break
-                    
+
                     conf = block.get("confidence", 1)
                     if conf >= self.THRESHOLD_EASYOCR:
                         continue
-                    
+
                     if ("is_key" in block.keys() and block["is_key"]) or self.is_field_key_similar(block["text"]):
                         continue
-                    
+
                     x_safe, y_safe, w_safe, h_safe = self.get_safe_block_xy(
                         line_idx, block_idx, lines, img_w, img_h
                     )
-                    
+
                     x1 = max(0, x_safe)
                     y1 = max(0, y_safe)
                     x2 = min(img_w, x_safe + w_safe)
                     y2 = min(img_h, y_safe + h_safe)
-                    
+
                     cropped = img[y1:y2, x1:x2]
-                    
+
                     if cropped.size == 0:
                         continue
-                    
+
                     # OCR avec EasyOCR
                     results = self.reader.readtext(cropped)
                     if not results:
                         continue
-                    
+
                     bbox, text, new_conf = results[0]
-                    
+
                     # Reprojection des coordonnées
                     new_x = int(bbox[0][0]) + x1
                     new_y = int(bbox[0][1]) + y1
                     new_w = int(bbox[1][0] - bbox[0][0])
                     new_h = int(bbox[2][1] - bbox[1][1])
-                    
+
                     block.update({
                         "text": text.strip(),
                         "x": new_x,
@@ -547,9 +554,9 @@ class CarteGriseExtractor:
                     })
                     counter_item += 1
                     print(f"OCR corrigé: {block['text']} (confiance: {new_conf:.2f})")
-        
+
         return lines
-    
+
     def get_block_pos_from_line(self, line, key, ratio=0.65):
         """Trouve la position d'un bloc dans une ligne"""
         if line is None or key is None:
@@ -558,41 +565,41 @@ class CarteGriseExtractor:
             if difflib.SequenceMatcher(None, block["text"].lower(), key.lower()).ratio() >= ratio:
                 return idx
         return -1
-    
+
     def has_field_key(self, line):
         """Vérifie si la ligne contient une clé de champ"""
         for block in line:
             if self.is_field_key_similar(block["text"]):
                 return True
         return False
-    
+
     def next_value_after_x_key(self, pos_x_current_line, next_line, image_width, y_tolerance=20):
         """Trouve la prochaine valeur après une clé (pour FR)"""
         mid_x = image_width / 2
-        
+
         for block in next_line:
             if block["x"] > (pos_x_current_line + y_tolerance):
                 if block["x"] < mid_x:
                     return block["text"]
         return ""
-    
+
     def next_value_before_x_key(self, pos_x_current_line, width, next_line, image_width, y_tolerance=20):
         """Trouve la prochaine valeur avant une clé (pour AR)"""
         mid_x = image_width / 2
-        
+
         for block in next_line[::-1]:
             if block["x"] < (pos_x_current_line + width - y_tolerance):
                 if (block["x"] + block["width"]) > mid_x:
                     return block["text"]
         return ""
-    
+
     def extract_value(self, merge_lines, idx, pos_fr, pos_ar, multiline, lang, image_width):
         """Extrait la valeur d'un champ"""
         value = ""
         current_line = merge_lines[idx]
         confidence = 0
         x = y = width = height = 0
-        
+
         block_result = {
             "text": value,
             "confidence": confidence,
@@ -601,7 +608,7 @@ class CarteGriseExtractor:
             "width": width,
             "height": height
         }
-        
+
         if lang == "fr":
             if pos_fr != -1 and (pos_fr + 1) < len(current_line):
                 if not self.is_field_key_similar(current_line[pos_fr + 1]["text"]):
@@ -628,7 +635,7 @@ class CarteGriseExtractor:
                     value = ""
             else:
                 return block_result
-        
+
         # Gestion multiline
         i = 1
         while multiline and (idx + i) < len(merge_lines) and not self.has_field_key(merge_lines[idx + i]):
@@ -642,7 +649,7 @@ class CarteGriseExtractor:
                     image_width
                 )
             i += 1
-        
+
         block_result = {
             "text": value,
             "confidence": confidence,
@@ -652,17 +659,17 @@ class CarteGriseExtractor:
             "height": height
         }
         return block_result
-    
+
     def parse_text(self, merge_lines, image_width):
         """Parse le texte pour extraire les champs"""
         result = []
         fields_key = self.config["FIELDS_KEY"]
-        
+
         for idx, line in enumerate(merge_lines):
             for key_data in fields_key.keys():
                 pos_fr = self.get_block_pos_from_line(line, fields_key[key_data]["fr"])
                 pos_ar = self.get_block_pos_from_line(line, fields_key[key_data]["ar"])
-                
+
                 if pos_fr != -1 or pos_ar != -1:
                     block_value_fr = self.extract_value(
                         merge_lines, idx, pos_fr, pos_ar,
@@ -672,7 +679,7 @@ class CarteGriseExtractor:
                         merge_lines, idx, pos_fr, pos_ar,
                         fields_key[key_data]["multi_line"], "ar", image_width
                     )
-                    
+
                     item_result = {
                         "fr": {
                             "key": fields_key[key_data]["fr"] if pos_fr != -1 else None,
@@ -693,33 +700,27 @@ class CarteGriseExtractor:
                             "height": int(block_value_ar["height"])
                         }
                     }
-                    
+
                     result.append(item_result)
                     break
-        
+
         return result
-    
-    def transform_json(self, data):
-        """Transforme les données au format final (placeholder)"""
-        # Cette fonction devrait être importée de json_transformer
-        # Pour l'instant, on retourne les données telles quelles
-        return data
-    
+
     def extract(self, image_path, document_type):
         """
         Méthode principale d'extraction
-        
+
         Args:
             image_path: Chemin vers l'image
             document_type: Type de document (carte_grise_recto ou carte_grise_verso)
-            
+
         Returns:
-            Dictionnaire contenant les données extraites
+            Dictionnaire contenant les données extraites au format unifié
         """
         start_time = time.time()
-        
+
         print(f"Début de l'extraction carte grise: {document_type}")
-        
+
         # Forcer la configuration selon le type
         if document_type == 'carte_grise_recto':
             self.config = self.CONF_RECTO
@@ -729,32 +730,29 @@ class CarteGriseExtractor:
             print("Configuration: VERSO (forcé)")
         else:
             raise ValueError(f"Type de document invalide: {document_type}")
-        
+
         # Prétraitement de l'image
         preprocessed_image, image_original = self.preprocess_image(image_path)
         _, image_width = image_original.shape[:2]
-        
+
         # Extraction du texte avec Tesseract
         print("Extraction du texte avec Tesseract")
         blocks = self.extract_text(preprocessed_image)
-        
+
         # Groupement par lignes
         print("Groupement des blocs par ligne")
         dynamic_y_tol = self.compute_dynamic_y_tolerance(blocks)
         blocks = self.group_blocks_by_line(blocks, y_tolerance=dynamic_y_tol)
-        
-        # Auto-détection si nécessaire (sécurité)
-        # self.config = self.detect_config_by_fr_fields(blocks)
-        
+
         # Fusion des blocs par ligne
         print("Fusion des blocs par ligne")
         merged_lines = [self.merge_blocks_line_by_gap(line) for line in blocks]
-        
+
         # Marquage des champs
         print("Marquage des champs détectés")
         fields_key = self.config["FIELDS_KEY"]
         line_marked_fields = self.mark_fields_in_blocks(merged_lines, fields_key, threshold=0.6)
-        
+
         # Correction avec EasyOCR
         print(f"Correction des blocs suspects (max {self.MAX_ITEMS_EASY_OCR} blocs)")
         lines_with_easy_ocr = self.correct_suspicious_blocks(
@@ -762,20 +760,21 @@ class CarteGriseExtractor:
             line_marked_fields,
             self.MAX_ITEMS_EASY_OCR
         )
-        
+
         # Filtrage des lignes
         print("Filtrage des lignes")
         lines_with_easy_ocr = self.filter_lines(lines_with_easy_ocr)
         lines_with_easy_ocr = self.mark_fields_in_blocks(lines_with_easy_ocr, fields_key, threshold=0.6)
-        
+
         # Parsing des données
         print("Parsing des données extraites")
         parsed_data = self.parse_text(lines_with_easy_ocr, image_width)
-        
-        # Transformation (si fonction disponible)
-        transformed_data = self.transform_json(parsed_data)
-        
+
+        # Transformation au format unifié (similaire CIN)
+        print("Transformation au format unifié")
+        transformed_data = transform_json(parsed_data)
+
         elapsed = time.time() - start_time
         print(f"Extraction carte grise terminée en {elapsed:.2f}s")
-        
+
         return transformed_data

@@ -1,0 +1,208 @@
+{
+  "info": {
+    "name": "API Extraction Documents Marocains",
+    "description": "Collection pour tester l'API d'extraction de documents (CIN et Cartes Grises)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:5000/health",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["health"]
+        },
+        "description": "Vérifie l'état de l'API"
+      }
+    },
+    {
+      "name": "Extract CIN Old",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "images/cin-old.jpg",
+              "description": "Image de la CIN ancienne"
+            },
+            {
+              "key": "document_type",
+              "value": "cin_old",
+              "type": "text",
+              "description": "Type de document"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["extract"]
+        },
+        "description": "Extrait les données d'une ancienne CIN"
+      }
+    },
+    {
+      "name": "Extract CIN New",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "images/cin_new.png",
+              "description": "Image de la nouvelle CIN"
+            },
+            {
+              "key": "document_type",
+              "value": "cin_new",
+              "type": "text",
+              "description": "Type de document"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["extract"]
+        },
+        "description": "Extrait les données d'une nouvelle CIN"
+      }
+    },
+    {
+      "name": "Extract Carte Grise Recto",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "images/carte-grise-recto.jpg",
+              "description": "Image du recto de la carte grise"
+            },
+            {
+              "key": "document_type",
+              "value": "carte_grise_recto",
+              "type": "text",
+              "description": "Type de document"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["extract"]
+        },
+        "description": "Extrait les données du recto de la carte grise"
+      }
+    },
+    {
+      "name": "Extract Carte Grise Verso",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "images/carte-grise-verso.jpg",
+              "description": "Image du verso de la carte grise"
+            },
+            {
+              "key": "document_type",
+              "value": "carte_grise_verso",
+              "type": "text",
+              "description": "Type de document"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["extract"]
+        },
+        "description": "Extrait les données du verso de la carte grise"
+      }
+    },
+    {
+      "name": "Test Invalid Type",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "images/cin_new.png"
+            },
+            {
+              "key": "document_type",
+              "value": "invalid_type",
+              "type": "text",
+              "description": "Type invalide pour tester l'erreur"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["extract"]
+        },
+        "description": "Test avec un type de document invalide (doit retourner erreur 400)"
+      }
+    },
+    {
+      "name": "Test Missing File",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "document_type",
+              "value": "cin_new",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "5000",
+          "path": ["extract"]
+        },
+        "description": "Test sans fichier (doit retourner erreur 400)"
+      }
+    }
+  ]
+}

@@ -24,10 +24,28 @@ def is_arabic(text: str) -> bool:
         return False
 
     # Plage de caractères arabes Unicode
-    arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF0-9]')
+    arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]')
 
     return bool(arabic_pattern.search(text))
 
+def arabe_dominated(text: str) -> bool:
+    """
+    Détecte si un texte contient majoritairement des caractères arabes
+    par rapport aux lettres latines (a-zA-Z).
+
+    Args:
+        text: Texte à analyser
+
+    Returns:
+        True si le texte contient plus de caractères arabes que latins
+    """
+    if not text or not isinstance(text, str):
+        return False
+
+    arabic_chars = re.findall(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]', text)
+    latin_chars = re.findall(r'[A-Za-z]', text)
+
+    return len(arabic_chars) > len(latin_chars)
 
 def normalize_key(key_fr: str, key_ar: str) -> str:
     """
@@ -179,7 +197,7 @@ def normalize_key(key_fr: str, key_ar: str) -> str:
         # (Éviter les clés en caractères arabes)
         return 'field_ar_' + str(hash(key_ar_clean) % 10000)
 
-    return None
+    return ""
 
 
 def transform_entry(entry: Dict) -> Dict[str, Any]:
@@ -216,22 +234,20 @@ def transform_entry(entry: Dict) -> Dict[str, Any]:
     # CAS 2: Les valeurs sont identiques
     if value_fr == value_ar and value_fr:
         # Détecter automatiquement la langue
-        if is_arabic(value_fr):
-            # C'est de l'arabe
-            result[f"{base_key}_ar"] = value_ar
+        if arabe_dominated(value_fr):
+            result[f"{base_key}_ar"] = normalize_value_ar(value_ar)
         else:
-            # C'est du français/latin
-            result[f"{base_key}_fr"] = value_fr
+            result[f"{base_key}_fr"] = normalize_value_fr(value_fr)
 
     # CAS 3: Les valeurs sont différentes
     else:
         # Ajouter la valeur française si présente
         if value_fr:
-            result[f"{base_key}_fr"] = value_fr
+            result[f"{base_key}_fr"] = normalize_value_fr(value_fr)
 
         # Ajouter la valeur arabe si présente
         if value_ar:
-            result[f"{base_key}_ar"] = value_ar
+            result[f"{base_key}_ar"] = normalize_value_ar(value_ar)
 
     # Ajouter les métadonnées si nécessaire (optionnel)
     # result[f"{base_key}_confidence"] = fr_data.get('confidence', 0)
@@ -244,6 +260,24 @@ def transform_entry(entry: Dict) -> Dict[str, Any]:
 
     return result
 
+def normalize_value_ar(value: str) -> str:
+    """
+    Conserve uniquement les caractères arabes et chiffres arabes dans la valeur.
+    """
+    if not value:
+        return value
+    return ''.join(re.findall(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF0-9\s,./\'-]', value))
+
+
+def normalize_value_fr(value: str) -> str:
+    """
+    Conserve uniquement les caractères français/latins (y compris accents), chiffres, espaces et ponctuation courante.
+    """
+    if not value:
+        return value
+
+    # Garder lettres (accentuées incluses), chiffres, espaces et ponctuation ,.-'
+    return ''.join(re.findall(r'[A-Za-zÀ-ÿ0-9\s,./\'-]', value))
 
 def transform_json(input_data: List[Dict]) -> Dict[str, Any]:
     """

@@ -2,10 +2,14 @@
 Extracteur pour les cartes grises marocaines (Recto et Verso)
 Intègre le code d'extraction existant
 """
+import os
+import sys
+import json
 import time
 import re
 import difflib
 import unicodedata
+import random
 from difflib import SequenceMatcher
 
 import pytesseract
@@ -163,18 +167,20 @@ class CarteGriseExtractor:
 
     def __init__(self):
         """Initialise l'extracteur de carte grise"""
-        print("Initialisation de l'extracteur de carte grise")
-        self.reader = None
+        self.reader = None  # Sera récupéré du singleton
         self.config = None
 
-    def _init_easyocr(self):
-        """Initialise le modèle EasyOCR une seule fois"""
+    def _get_easyocr_reader(self):
+        """Récupère le reader EasyOCR depuis le singleton"""
         if self.reader is None:
-            print("Chargement du modèle EasyOCR")
-            start = time.time()
-            self.reader = easyocr.Reader(["en", "ar"], gpu=False)
-            elapsed = time.time() - start
-            print(f"Modèle EasyOCR chargé en {elapsed:.2f}s")
+            try:
+                from ocr_manager import get_easyocr_reader
+                self.reader = get_easyocr_reader()
+            except ImportError:
+                # Fallback si ocr_manager n'est pas disponible
+                import easyocr
+                self.reader = easyocr.Reader(["en", "ar"], gpu=False)
+        return self.reader
 
     def detect_config_by_fr_fields(self, merged_lines, min_fields=3, threshold=0.6):
         """Détecte automatiquement si c'est un recto ou verso"""
@@ -193,7 +199,6 @@ class CarteGriseExtractor:
                         if SequenceMatcher(None, text, field["fr"]).ratio() >= threshold:
                             recto_found.add(field_name)
                             if len(recto_found) >= min_fields:
-                                print(f"Détection automatique: RECTO ({len(recto_found)} champs trouvés)")
                                 return self.CONF_RECTO
 
                 # Check VERSO
@@ -202,11 +207,9 @@ class CarteGriseExtractor:
                         if SequenceMatcher(None, text, field["fr"]).ratio() >= threshold:
                             verso_found.add(field_name)
                             if len(verso_found) >= min_fields:
-                                print(f"Détection automatique: VERSO ({len(verso_found)} champs trouvés)")
                                 return self.CONF_VERSO
 
-        # Par défaut, on retourne RECTO
-        print("Détection automatique: RECTO (par défaut)")
+        # Par défaut
         return self.CONF_RECTO
 
     @staticmethod
@@ -497,7 +500,7 @@ class CarteGriseExtractor:
 
     def correct_suspicious_blocks(self, img, lines, max_item):
         """Corrige les blocs suspects avec EasyOCR"""
-        self._init_easyocr()
+        reader = self._get_easyocr_reader()
 
         img_h, img_w = img.shape[:2]
         y_min = self.config["DELETE_LINES_BEFORE_Y"]
@@ -531,8 +534,8 @@ class CarteGriseExtractor:
                     if cropped.size == 0:
                         continue
 
-                    # OCR avec EasyOCR
-                    results = self.reader.readtext(cropped)
+                    # OCR avec EasyOCR partagé
+                    results = reader.readtext(cropped)
                     if not results:
                         continue
 
@@ -553,7 +556,6 @@ class CarteGriseExtractor:
                         "confidence": new_conf
                     })
                     counter_item += 1
-                    print(f"OCR corrigé: {block['text']} (confiance: {new_conf:.2f})")
 
         return lines
 
@@ -719,62 +721,49 @@ class CarteGriseExtractor:
         """
         start_time = time.time()
 
-        print(f"Début de l'extraction carte grise: {document_type}")
-
-        # Forcer la configuration selon le type
+        # Configuration selon le type
         if document_type == 'carte_grise_recto':
             self.config = self.CONF_RECTO
-            print("Configuration: RECTO (forcé)")
         elif document_type == 'carte_grise_verso':
             self.config = self.CONF_VERSO
-            print("Configuration: VERSO (forcé)")
         else:
             raise ValueError(f"Type de document invalide: {document_type}")
 
-        # Prétraitement de l'image
+        # Prétraitement
         preprocessed_image, image_original = self.preprocess_image(image_path)
         _, image_width = image_original.shape[:2]
 
-        # Extraction du texte avec Tesseract
-        print("Extraction du texte avec Tesseract")
+        # Extraction Tesseract
         blocks = self.extract_text(preprocessed_image)
 
         # Groupement par lignes
-        print("Groupement des blocs par ligne")
         dynamic_y_tol = self.compute_dynamic_y_tolerance(blocks)
         blocks = self.group_blocks_by_line(blocks, y_tolerance=dynamic_y_tol)
 
-        # Fusion des blocs par ligne
-        print("Fusion des blocs par ligne")
+        # Fusion des blocs
         merged_lines = [self.merge_blocks_line_by_gap(line) for line in blocks]
 
         # Marquage des champs
-        print("Marquage des champs détectés")
         fields_key = self.config["FIELDS_KEY"]
         line_marked_fields = self.mark_fields_in_blocks(merged_lines, fields_key, threshold=0.6)
 
-        # Correction avec EasyOCR
-        print(f"Correction des blocs suspects (max {self.MAX_ITEMS_EASY_OCR} blocs)")
+        # Correction EasyOCR
         lines_with_easy_ocr = self.correct_suspicious_blocks(
             image_original,
             line_marked_fields,
             self.MAX_ITEMS_EASY_OCR
         )
 
-        # Filtrage des lignes
-        print("Filtrage des lignes")
+        # Filtrage
         lines_with_easy_ocr = self.filter_lines(lines_with_easy_ocr)
         lines_with_easy_ocr = self.mark_fields_in_blocks(lines_with_easy_ocr, fields_key, threshold=0.6)
 
-        # Parsing des données
-        print("Parsing des données extraites")
+        # Parsing
         parsed_data = self.parse_text(lines_with_easy_ocr, image_width)
 
-        # Transformation au format unifié (similaire CIN)
-        print("Transformation au format unifié")
+        # Transformation au format unifié
         transformed_data = transform_json(parsed_data)
 
         elapsed = time.time() - start_time
-        print(f"Extraction carte grise terminée en {elapsed:.2f}s")
 
         return transformed_data

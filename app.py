@@ -25,6 +25,15 @@ app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
 # Créer le dossier uploads
 Path(app.config['UPLOAD_FOLDER']).mkdir(exist_ok=True)
 
+# Initialiser les modèles OCR au démarrage (une seule fois)
+print("=" * 70)
+print("Initialisation des modèles OCR au démarrage...")
+print("=" * 70)
+from ocr_manager import OCRManager
+ocr_manager = OCRManager()  # Charge EasyOCR une seule fois
+print("Modèles OCR prêts !")
+print("=" * 70)
+
 
 def allowed_file(filename):
     """Vérifie si l'extension du fichier est autorisée"""
@@ -62,10 +71,10 @@ def health_check():
 def extract_document():
     """
     Endpoint principal pour l'extraction de documents
+    Détection automatique du type de document
 
     Paramètres:
         - file: Fichier image du document
-        - document_type: Type de document (cin_old, cin_new, carte_grise_recto, carte_grise_verso)
 
     Retour:
         JSON contenant les données extraites
@@ -93,24 +102,6 @@ def extract_document():
             'message': f'Extensions autorisées: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'
         }), 400
 
-    # Récupération du type de document
-    document_type = request.form.get('document_type', '').lower()
-
-    if not document_type:
-        return jsonify({
-            'error': 'Type de document manquant',
-            'message': 'Le paramètre "document_type" est requis',
-            'valid_types': ['cin_old', 'cin_new', 'carte_grise_recto', 'carte_grise_verso']
-        }), 400
-
-    valid_types = ['cin_old', 'cin_new', 'carte_grise_recto', 'carte_grise_verso']
-    if document_type not in valid_types:
-        return jsonify({
-            'error': 'Type de document invalide',
-            'message': f'Type "{document_type}" non supporté',
-            'valid_types': valid_types
-        }), 400
-
     # Sauvegarde temporaire du fichier
     filename = secure_filename(file.filename)
     timestamp = int(time.time() * 1000)
@@ -119,10 +110,14 @@ def extract_document():
 
     try:
         file.save(filepath)
-        print(f"Fichier sauvegardé: {filepath}")
 
-        # Extraction selon le type de document
-        print(f"Début de l'extraction pour type: {document_type}")
+        # Détection automatique du type de document
+        from extractors.document_detector import detect_document_type
+        document_type = detect_document_type(filepath)
+
+        print(f"Type détecté automatiquement: {document_type}")
+
+        # Extraction selon le type détecté
         extraction_start = time.time()
 
         if document_type in ['cin_old', 'cin_new']:
@@ -134,9 +129,6 @@ def extract_document():
 
         extraction_time = time.time() - extraction_start
         total_time = time.time() - start_time
-
-        print(f"Extraction terminée en {extraction_time:.2f}s")
-        print(f"Temps total de traitement: {total_time:.2f}s")
 
         # Nettoyage du fichier temporaire
         cleanup_file(filepath)
@@ -166,8 +158,7 @@ def extract_document():
 
         return jsonify({
             'error': 'Erreur lors de l\'extraction',
-            'message': str(e),
-            'document_type': document_type
+            'message': str(e)
         }), 500
 
 

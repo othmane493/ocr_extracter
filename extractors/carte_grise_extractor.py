@@ -2,23 +2,17 @@
 Extracteur pour les cartes grises marocaines (Recto et Verso)
 Intègre le code d'extraction existant
 """
-import os
-import sys
-import json
 import time
 import re
 import difflib
 import unicodedata
-import random
 from difflib import SequenceMatcher
 
 import pytesseract
 import cv2
-import easyocr
 
-# Import du transformateur JSON
 try:
-    from json_transformer import transform_json
+    from json_transformer import transform_json, is_arabic
 except ImportError:
     # Fallback si le module n'est pas trouvé
     def transform_json(data):
@@ -30,53 +24,62 @@ class CarteGriseExtractor:
 
     # Configuration commune
     THRESHOLD_EASYOCR = 0.60
-    MAX_ITEMS_EASY_OCR = 10
+    MAX_ITEMS_EASY_OCR = 6
 
     # Configuration Recto
     FIELDS_KEY_RECTO = {
         "registration_number": {
             "fr": "Numéro d'immatriculation",
             "ar": "رقم التسجيل",
+            "normalise": "0-9أبدهوهـط-",
             "multi_line": False
         },
         "previous_registration": {
             "fr": "Immatriculation antérieure",
             "ar": "الترقيم السابق",
+            "normalise": "A-Z0-9",
             "multi_line": False
         },
         "first_registration_date": {
             "fr": "Première mise en circulation",
             "ar": "أول شروع في الإستخدام",
+            "normalise": "0-9/",
             "multi_line": False
         },
         "first_usage_date": {
             "fr": "M.C au maroc",
             "ar": "أول استخدام بالمغرب",
+            "normalise": "0-9/",
             "multi_line": False
         },
         "date_mutation": {
             "fr": "Mutation le",
             "ar": "تحويل بتاريخ",
+            "normalise": "0-9/",
             "multi_line": False
         },
         "usage": {
             "fr": "Usage",
             "ar": "نوع الإستعمال",
+            "normalise": "A-Za-zÀ-ÿ0-9\s_-",
             "multi_line": False
         },
         "owner": {
             "fr": "Propriétaire",
             "ar": "المالك",
+            "normalise": "A-Za-z0-9\u0600-\u06FF\\s",
             "multi_line": True
         },
         "address": {
             "fr": "Adresse",
             "ar": "العنوان",
+            "normalise": "A-Za-z0-9\u0600-\u06FF\\s",
             "multi_line": True
         },
         "expiry_date": {
             "fr": "Fin de validité",
             "ar": "نهاية الصلاحية",
+            "normalise": "0-9/",
             "multi_line": False
         }
     }
@@ -93,67 +96,80 @@ class CarteGriseExtractor:
         "Marque": {
             "fr": "Marque",
             "ar": "الاسم التجاري",
+            "normalise": "A-Za-z\\s_-",
             "multi_line": False
         },
         "Type": {
             "fr": "Type",
             "ar": "الصنف",
+            "normalise": "A-Z0-9",
             "multi_line": False,
             "enable_easy_ocr": False
         },
         "Genre": {
             "fr": "Genre",
             "ar": "النوع",
+            "normalise": "A-Za-z_\\s-",
             "multi_line": False
         },
         "Modèle": {
             "fr": "Modèle",
             "ar": "النموذج",
+            "normalise": "A-Za-z_\\s-",
             "multi_line": False
         },
         "Type_Carburant": {
             "fr": "Type carburant",
             "ar": "نوع الوقود",
+            "normalise": "A-Za-z",
             "multi_line": False
         },
         "Number_chassis": {
             "fr": "N° du chassis",
             "ar": "رقم الإطار الحديدي",
+            "normalise": "A-Z0-9",
             "multi_line": False
         },
         "Number_Cylinders": {
             "fr": "Nombre de cylindres",
             "ar": "عدد الأسطوانات",
+            "normalise": "0-9",
             "multi_line": False
         },
         "Puissance_Fiscale": {
             "fr": "Puissance fiscale",
             "ar": "القوة الجبائية",
+            "normalise": "0-9",
             "multi_line": False
         },
         "Number_Places": {
             "fr": "Nombre de places",
             "ar": "عدد المقاعد",
+            "normalise": "0-9",
             "multi_line": False
         },
-        "P.T.A.C": {
+        "PTAC": {
             "fr": "P.T.A.C",
             "ar": "الوزن جمالي",
+            "normalise": "0-9kKgG\\s",
             "multi_line": False
         },
         "Poids_vide": {
             "fr": "Poids à vide",
             "ar": "الوزن الفارغ",
+            "normalise": "0-9kKgG\\s",
             "multi_line": False
         },
-        "P.T.R.A": {
+        "PTRA": {
             "fr": "P.T.R.A",
             "ar": "الوزن الإجمالي مع المجرور",
+            "normalise": "0-9kKgG\\s-",
             "multi_line": False
         },
         "Restrictions": {
             "fr": "Restrictions",
             "ar": "التقييدات",
+            "normalise": "A-Za-z\u0600-\u06FF\\s\\-",
             "multi_line": False
         }
     }
@@ -211,6 +227,17 @@ class CarteGriseExtractor:
 
         # Par défaut
         return self.CONF_RECTO
+
+    def normalise_value(self, value: str, allowed_chars: str) -> str:
+        """
+        Supprime tous les caractères non autorisés
+        allowed_chars ex: A-Za-z0-9-_
+        """
+        if not value:
+            return value
+
+        pattern = rf"[^{allowed_chars}]"
+        return re.sub(pattern, "", value)
 
     @staticmethod
     def preprocess_image(image_path):
@@ -345,17 +372,18 @@ class CarteGriseExtractor:
         merged_line.append(current)
         return merged_line
 
-    def get_best_field_match(self, text, fields, lang, threshold=0.6):
+    def get_best_field_match(self, text, fields, fields_detected, lang, threshold=0.6):
         """Retourne le champ qui correspond le mieux au texte"""
         best_match = None
         best_ratio = 0.0
 
         for field_name, labels in fields.items():
-            label = labels.get(lang, "")
-            ratio = SequenceMatcher(None, text, label).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_match = field_name
+            if field_name not in fields_detected:
+                label = labels.get(lang, "")
+                ratio = SequenceMatcher(None, text, label).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_match = field_name
 
         if best_ratio >= threshold:
             return best_match
@@ -363,18 +391,20 @@ class CarteGriseExtractor:
 
     def mark_fields_in_blocks(self, merged_lines, fields, threshold=0.6):
         """Marque les blocs qui correspondent à des champs"""
+        fields_detected_fr = []
+        fields_detected_ar = []
         for line in merged_lines:
             cut_from = None
             cut_to = None
 
             for idy, block in enumerate(line):
                 lang = "fr"
-                field_name = self.get_best_field_match(block["text"], fields, lang, threshold)
-
+                field_name = self.get_best_field_match(block["text"], fields, fields_detected_fr, lang, threshold)
+                fields_detected_fr.append(field_name)
                 if field_name is None:
                     lang = "ar"
-                    field_name = self.get_best_field_match(block["text"], fields, lang, threshold)
-
+                    field_name = self.get_best_field_match(block["text"], fields, fields_detected_ar, lang, threshold)
+                    fields_detected_ar.append(field_name)
                 if field_name:
                     block["text"] = fields[field_name][lang]
                     block["is_key"] = True
@@ -419,21 +449,7 @@ class CarteGriseExtractor:
             if not (y_min <= line[0]["y"] <= y_max):
                 continue
 
-            cleaned_line = []
-            for block in line:
-                text = block.get("text", "").strip()
-
-                if block.get("is_key", False):
-                    cleaned_line.append(block)
-                    continue
-
-                if not self.has_meaningful_char(text):
-                    continue
-
-                cleaned_line.append(block)
-
-            if cleaned_line:
-                filtered_lines.append(cleaned_line)
+            filtered_lines.append(line)
 
         return filtered_lines
 
@@ -595,7 +611,7 @@ class CarteGriseExtractor:
                     return block["text"]
         return ""
 
-    def extract_value(self, merge_lines, idx, pos_fr, pos_ar, multiline, lang, image_width):
+    def extract_value(self, merge_lines, idx, pos_fr, pos_ar, multiline, lang, pattern, image_width):
         """Extrait la valeur d'un champ"""
         value = ""
         current_line = merge_lines[idx]
@@ -653,7 +669,7 @@ class CarteGriseExtractor:
             i += 1
 
         block_result = {
-            "text": value,
+            "text": self.normalise_value(value, pattern),
             "confidence": confidence,
             "x": x,
             "y": y,
@@ -666,26 +682,27 @@ class CarteGriseExtractor:
         """Parse le texte pour extraire les champs"""
         result = []
         fields_key = self.config["FIELDS_KEY"]
-
+        keys = list(fields_key.keys())
         for idx, line in enumerate(merge_lines):
-            for key_data in fields_key.keys():
+            for idk,key_data in enumerate(keys):
                 pos_fr = self.get_block_pos_from_line(line, fields_key[key_data]["fr"])
                 pos_ar = self.get_block_pos_from_line(line, fields_key[key_data]["ar"])
+                pattern = fields_key[key_data]["normalise"]
 
                 if pos_fr != -1 or pos_ar != -1:
                     block_value_fr = self.extract_value(
                         merge_lines, idx, pos_fr, pos_ar,
-                        fields_key[key_data]["multi_line"], "fr", image_width
+                        fields_key[key_data]["multi_line"], "fr", pattern, image_width
                     )
                     block_value_ar = self.extract_value(
                         merge_lines, idx, pos_fr, pos_ar,
-                        fields_key[key_data]["multi_line"], "ar", image_width
+                        fields_key[key_data]["multi_line"], "ar", pattern, image_width
                     )
 
                     item_result = {
                         "fr": {
-                            "key": fields_key[key_data]["fr"] if pos_fr != -1 else None,
-                            "value": block_value_fr["text"],
+                            "key": fields_key[key_data]["fr"] if pos_fr != -1 or pos_ar != -1 else None,
+                            "value":block_value_fr["text"],
                             "confidence": int(block_value_fr["confidence"] * 100),
                             "x": int(block_value_fr["x"]),
                             "y": int(block_value_fr["y"]),
@@ -693,7 +710,7 @@ class CarteGriseExtractor:
                             "height": int(block_value_fr["height"])
                         },
                         "ar": {
-                            "key": fields_key[key_data]["ar"] if pos_ar != -1 else None,
+                            "key": fields_key[key_data]["ar"] if pos_ar != -1 or pos_fr != -1 else None,
                             "value": block_value_ar["text"],
                             "confidence": int(block_value_ar["confidence"] * 100),
                             "x": int(block_value_ar["x"]),
@@ -702,8 +719,8 @@ class CarteGriseExtractor:
                             "height": int(block_value_ar["height"])
                         }
                     }
-
                     result.append(item_result)
+                    del keys[idk]
                     break
 
         return result

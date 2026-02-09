@@ -2,6 +2,8 @@
 Détecteur automatique universel de documents
 Utilise la détection CIN existante de cin_detector.py
 """
+import time
+
 import cv2
 import numpy as np
 import pytesseract
@@ -28,8 +30,11 @@ def detect_document_type(image_path: str) -> str:
 
     if doc_category == 'cin':
         # Utiliser la détection CIN existante qui fonctionne parfaitement
+        start = time.time()
         from cin_detector import CINTypeDetector
         cin_type = CINTypeDetector.detect_cin_type(image_path)
+        print("detector_time")
+        print(time.time() - start)
         result = 'cin_old' if cin_type == 'OLD' else 'cin_new'
         print(f"Type CIN détecté: {result}")
         return result

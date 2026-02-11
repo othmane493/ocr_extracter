@@ -56,13 +56,15 @@ class CINOldExtractor(CINExtractor):
         gray = cv2.cvtColor(img_big, cv2.COLOR_BGR2GRAY)
         
         # Égalisation adaptative de l'histogramme (CLAHE)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(10, 10))
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
         
         # Augmentation du contraste sans casser le texte
         sharpened = cv2.addWeighted(gray, 2.1, gray, -0.5, 0)
-        
-        return sharpened
+        # Binarisation avec Otsu
+        _, thresh = cv2.threshold(gray, 146, 100, cv2.MORPH_DIAMOND)
+        cv2.imwrite("test.jpg", thresh)
+        return thresh
     
     def preprocessing_alternative(self, img: np.ndarray) -> np.ndarray:
         """

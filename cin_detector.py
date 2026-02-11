@@ -3,9 +3,8 @@ Détecteur automatique de type de CIN et point d'entrée unifié
 """
 import cv2
 import numpy as np
-import json
+from utils.similarity import compare_name_ar_fr
 from typing import Dict, Tuple, Optional
-from pathlib import Path
 from cin_new_extractor import CINNewExtractor
 from cin_old_extractor import CINOldExtractor
 
@@ -260,7 +259,6 @@ class UnifiedCINExtractor:
 # Fonction de commodité pour l'import simple
 def extract_cin(image_path: str,
                cin_type: Optional[str] = None,
-               compare_name_func=None,
                debug: bool = True) -> Dict:
     """
     Fonction simple pour extraire les données d'une CIN
@@ -281,6 +279,6 @@ def extract_cin(image_path: str,
     return UnifiedCINExtractor.extract_from_image(
         image_path,
         cin_type,
-        compare_name_func,
+        compare_name_ar_fr,
         debug
     )

@@ -8,8 +8,10 @@ import numpy as np
 import easyocr
 import re
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Any
 from pathlib import Path
+
+from json_transformer import is_arabic
 
 
 class CINExtractor(ABC):
@@ -145,8 +147,16 @@ class CINExtractor(ABC):
         return str(txt)
 
     @staticmethod
-    def should_retry_ocr(field: str, text: str, results: Dict,
-                        compare_func=None, threshold: float = 0.80) -> bool:
+    def is_wrong_lang(field: str, text: str) -> bool:
+        if field.endswith("_ar") and not is_arabic(text):
+            return True
+        if field.endswith("_fr") and is_arabic(text):
+            return True
+        return False
+
+    @staticmethod
+    def cmp_phonetic_lang(field: str, text: str, results: Dict,
+                        compare_func=None, confidence: float = 0) -> float | bool | int | Any:
         """
         Détermine si l'OCR doit être rejoué avec EasyOCR
         Vérifie la cohérence entre les versions AR et FR
@@ -162,17 +172,17 @@ class CINExtractor(ABC):
             True si l'OCR doit être rejoué
         """
         if not field.endswith("_ar") or compare_func is None:
-            return True
+            return confidence
 
         fr_field = field.replace("_ar", "_fr")
         if fr_field in results and results[fr_field]:
             try:
                 cmp = compare_func(text, results[fr_field])
-                return cmp.get("is_match", 0) < threshold
+                return cmp.get("score", 0)
             except Exception:
-                return True
+                return confidence
 
-        return True
+        return confidence
 
     @staticmethod
     def reorder_identity_fields(data: Dict) -> Dict:
@@ -293,17 +303,19 @@ class CINExtractor(ABC):
             # Filtrage des blocs
             blocks = [b for b in blocks if self.filter_text_by_strictness(b.get("text", ""))]
 
-            ocr_text = ""
-
             if blocks:
                 ocr_text = " ".join(b.get("text", "") for b in blocks)
                 confidence = sum(b.get("confidence", 0) for b in blocks) / len(blocks)
-
+                if self.is_wrong_lang(field, ocr_text):
+                    zone_retry = self.preprocess_zone_easyocr(zone)
+                    ocr_text = self.easyocr_text(zone_retry)
                 # Retry avec EasyOCR si confiance faible
-                if confidence < self.get_confidence_threshold():
-                    if self.should_retry_ocr(field, ocr_text, results, compare_name_func):
-                        zone_retry = self.preprocess_zone_easyocr(zone)
-                        ocr_text = self.easyocr_text(zone_retry)
+                elif field.endswith("_ar") or confidence < self.get_confidence_threshold():
+                    cmp_tesseract = self.cmp_phonetic_lang(field, ocr_text, results, compare_name_func, int(confidence/100))
+                    zone_retry = self.preprocess_zone_easyocr(zone)
+                    ocr_easyocr_text = self.easyocr_text(zone_retry)
+                    cmp_easyocr = self.cmp_phonetic_lang(field, ocr_easyocr_text, results, compare_name_func)
+                    ocr_text = ocr_easyocr_text if cmp_tesseract < cmp_easyocr else ocr_text
             else:
                 # Pas de texte trouvé avec Tesseract, utiliser EasyOCR
                 zone_retry = self.preprocess_zone_easyocr(zone)

@@ -24,7 +24,9 @@ def is_arabic(text: str) -> bool:
         return False
 
     # Plage de caractères arabes Unicode
-    arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]')
+    arabic_pattern = re.compile(
+        r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0660-\u0669\u06F0-\u06F9]'
+    )
 
     return bool(arabic_pattern.search(text))
 

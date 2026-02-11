@@ -34,7 +34,6 @@ class CINExtractor:
         Returns:
             Dictionnaire contenant les données extraites
         """
-        start_time = time.time()
 
         # Conversion du type
         if cin_type == 'cin_old':

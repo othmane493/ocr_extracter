@@ -24,7 +24,7 @@ class CarteGriseExtractor:
 
     # Configuration commune
     THRESHOLD_EASYOCR = 0.60
-    MAX_ITEMS_EASY_OCR = 6
+    MAX_ITEMS_EASY_OCR = 10
 
     # Configuration Recto
     FIELDS_KEY_RECTO = {
@@ -67,7 +67,7 @@ class CarteGriseExtractor:
         "owner": {
             "fr": "Propriétaire",
             "ar": "المالك",
-            "normalise": "A-Za-z0-9\u0600-\u06FF\\s",
+            "normalise": "A-Za-z\u0600-\u06FF\\s",
             "multi_line": True
         },
         "address": {
@@ -522,10 +522,8 @@ class CarteGriseExtractor:
         else:
             x_next_min = img_w
 
-        x_safe = min(block_x, x_prev_max)
-        x_right = max(block_x_max, x_next_min)
-        x_safe = max(0, x_safe)
-        x_right = min(img_w, x_right)
+        x_safe = max(block_x - int((block_x - x_prev_max)/5) , x_prev_max)
+        x_right = min(block_x_max + int((x_next_min - block_x_max)/5), x_next_min)
         w_safe = max(1, x_right - x_safe)
 
         return x_safe, y_safe, w_safe, h_safe
@@ -565,8 +563,10 @@ class CarteGriseExtractor:
 
                     if cropped.size == 0:
                         continue
+
                     # Write zone to test
-                    cv2.imwrite("zone_test.jpg", cropped)
+                    filename = f"zone_test_{line_idx}_{block_idx}.jpg"
+                    cv2.imwrite("debug/" + filename, cropped)
                     # OCR avec EasyOCR partagé
                     results = reader_ar.readtext(cropped) if is_arabic(block['text']) else reader_en.readtext(cropped)
                     if not results:

@@ -4,7 +4,6 @@ Utilise l'architecture POO existante via extract_cin
 """
 import os
 import sys
-import time
 
 # Import de l'architecture CIN existante
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

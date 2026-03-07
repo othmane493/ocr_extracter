@@ -183,20 +183,22 @@ class CarteGriseExtractor:
 
     def __init__(self):
         """Initialise l'extracteur de carte grise"""
-        self.reader = None  # Sera récupéré du singleton
+        self.reader_ar = None  # Sera récupéré du singleton
+        self.reader_en = None  # Sera récupéré du singleton
         self.config = None
 
     def _get_easyocr_reader(self):
         """Récupère le reader EasyOCR depuis le singleton"""
-        if self.reader is None:
+        if self.reader_en is None or self.reader_ar is None:
             try:
                 from ocr_manager import get_easyocr_reader
-                self.reader = get_easyocr_reader()
+                self.reader_ar, self.reader_en = get_easyocr_reader()
             except ImportError:
                 # Fallback si ocr_manager n'est pas disponible
                 import easyocr
-                self.reader = easyocr.Reader(["en", "ar"], gpu=False)
-        return self.reader
+                self.reader_ar = easyocr.Reader(["ar"], gpu=False)
+                self.reader_en = easyocr.Reader(["en"], gpu=False)
+        return self.reader_ar, self.reader_en
 
     def detect_config_by_fr_fields(self, merged_lines, min_fields=3, threshold=0.6):
         """Détecte automatiquement si c'est un recto ou verso"""
@@ -339,6 +341,18 @@ class CarteGriseExtractor:
             return False
         return bool(re.search(r'[\u0600-\u06FF]', text))
 
+    @staticmethod
+    def recalculate_width_from_length(block: dict, new_text: str):
+        old_text = (block.get("text") or "").strip()
+        old_width = int(block.get("width", 0) or 0)
+        if not old_text or old_width <= 0:
+            return old_width
+        if old_text != new_text:
+            width_letter = old_width / max(1, len(old_text))
+            new_width = int(old_width + (len(new_text) - len(old_text)) * width_letter)
+            return new_width
+        return old_width
+
     def merge_blocks_line_by_gap(self, line):
         """Fusionne les blocs d'une ligne selon les espaces"""
         if not line:
@@ -362,7 +376,7 @@ class CarteGriseExtractor:
                     current["text"] = b["text"] + " " + current["text"]
                 else:
                     current["text"] += " " + b["text"]
-                current["width"] = (b["x"] + b["width"]) - current["x"]
+                current["width"] = current["width"] + b["width"]
                 current["height"] = max(current["height"], b["height"])
                 current["confidence"] = (current["confidence"] + b["confidence"]) / 2
             else:
@@ -389,6 +403,7 @@ class CarteGriseExtractor:
             return best_match
         return None
 
+
     def mark_fields_in_blocks(self, merged_lines, fields, threshold=0.6):
         """Marque les blocs qui correspondent à des champs"""
         fields_detected_fr = []
@@ -406,6 +421,7 @@ class CarteGriseExtractor:
                     field_name = self.get_best_field_match(block["text"], fields, fields_detected_ar, lang, threshold)
                     fields_detected_ar.append(field_name)
                 if field_name:
+                    block["width"] = self.recalculate_width_from_length(block, fields[field_name][lang])
                     block["text"] = fields[field_name][lang]
                     block["is_key"] = True
                     block["field_name"] = field_name
@@ -516,7 +532,7 @@ class CarteGriseExtractor:
 
     def correct_suspicious_blocks(self, img, lines, max_item):
         """Corrige les blocs suspects avec EasyOCR"""
-        reader = self._get_easyocr_reader()
+        reader_ar, reader_en = self._get_easyocr_reader()
 
         img_h, img_w = img.shape[:2]
         y_min = self.config["DELETE_LINES_BEFORE_Y"]
@@ -549,9 +565,10 @@ class CarteGriseExtractor:
 
                     if cropped.size == 0:
                         continue
-
+                    # Write zone to test
+                    cv2.imwrite("zone_test.jpg", cropped)
                     # OCR avec EasyOCR partagé
-                    results = reader.readtext(cropped)
+                    results = reader_ar.readtext(cropped) if is_arabic(block['text']) else reader_en.readtext(cropped)
                     if not results:
                         continue
 
@@ -780,7 +797,5 @@ class CarteGriseExtractor:
 
         # Transformation au format unifié
         transformed_data = transform_json(parsed_data)
-
-        elapsed = time.time() - start_time
 
         return transformed_data

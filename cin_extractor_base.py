@@ -8,8 +8,7 @@ import numpy as np
 import easyocr
 import re
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Optional, List, Any
-from pathlib import Path
+from typing import Dict, Tuple, List, Any
 
 from json_transformer import is_arabic
 
@@ -32,7 +31,7 @@ class CINExtractor(ABC):
         self.debug_image_path = "debug_zones.png"
 
         # Utiliser le reader EasyOCR partagé du singleton
-        if not hasattr(CINExtractor, '_reader') or CINExtractor._reader is None:
+        if not hasattr(CINExtractor, '_reader_ar') or not hasattr(CINExtractor, '_reader_en') or CINExtractor._reader_ar is None or CINExtractor._reader_en is None:
             try:
                 # Essayer d'utiliser le singleton
                 import sys
@@ -42,12 +41,14 @@ class CINExtractor(ABC):
                     sys.path.insert(0, parent_dir)
 
                 from ocr_manager import get_easyocr_reader
-                CINExtractor._reader = get_easyocr_reader()
+                CINExtractor._reader_ar, CINExtractor._reader_en = get_easyocr_reader()
             except (ImportError, Exception):
                 # Fallback si le singleton n'est pas disponible
-                CINExtractor._reader = easyocr.Reader(["en", "ar"], gpu=False, verbose=False)
+                CINExtractor._reader_ar = easyocr.Reader(["ar"], gpu=False)
+                CINExtractor._reader_en = easyocr.Reader(["en"], gpu=False)
 
-        self.reader = CINExtractor._reader
+        self.reader_ar = CINExtractor._reader_ar
+        self.reader_en = CINExtractor._reader_en
         self.template = None
         self.img = None
 
@@ -131,7 +132,7 @@ class CINExtractor(ABC):
         text = str(text).strip()
         return bool(re.fullmatch(r"[A-Za-z0-9\u0600-\u06FF\s\./-]+", text))
 
-    def easyocr_text(self, zone: np.ndarray) -> str:
+    def easyocr_text(self, zone: np.ndarray, lang) -> str:
         """
         Extrait le texte d'une zone avec EasyOCR
 
@@ -141,7 +142,10 @@ class CINExtractor(ABC):
         Returns:
             Texte extrait
         """
-        txt = self.reader.readtext(zone, detail=0)
+        if lang == "ar":
+            txt = self.reader_ar.readtext(zone, detail=0)
+        else:
+            txt = self.reader_en.readtext(zone, detail=0)
         if isinstance(txt, list):
             return " ".join(txt)
         return str(txt)
@@ -302,24 +306,24 @@ class CINExtractor(ABC):
 
             # Filtrage des blocs
             blocks = [b for b in blocks if self.filter_text_by_strictness(b.get("text", ""))]
-
+            lang_field = "fr" if field.endswith("fr") else "ar"
             if blocks:
                 ocr_text = " ".join(b.get("text", "") for b in blocks)
                 confidence = sum(b.get("confidence", 0) for b in blocks) / len(blocks)
                 if self.is_wrong_lang(field, ocr_text):
                     zone_retry = self.preprocess_zone_easyocr(zone)
-                    ocr_text = self.easyocr_text(zone_retry)
+                    ocr_text = self.easyocr_text(zone_retry, lang_field)
                 # Retry avec EasyOCR si confiance faible
                 elif field.endswith("_ar") or confidence < self.get_confidence_threshold():
                     cmp_tesseract = self.cmp_phonetic_lang(field, ocr_text, results, compare_name_func, int(confidence/100))
                     zone_retry = self.preprocess_zone_easyocr(zone)
-                    ocr_easyocr_text = self.easyocr_text(zone_retry)
+                    ocr_easyocr_text = self.easyocr_text(zone_retry,  lang_field)
                     cmp_easyocr = self.cmp_phonetic_lang(field, ocr_easyocr_text, results, compare_name_func)
                     ocr_text = ocr_easyocr_text if cmp_tesseract < cmp_easyocr else ocr_text
             else:
                 # Pas de texte trouvé avec Tesseract, utiliser EasyOCR
                 zone_retry = self.preprocess_zone_easyocr(zone)
-                ocr_text = self.easyocr_text(zone_retry)
+                ocr_text = self.easyocr_text(zone_retry, lang_field)
 
             # Normalisation des dates
             if "date" in field:

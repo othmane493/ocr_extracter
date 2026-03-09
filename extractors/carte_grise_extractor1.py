@@ -2,11 +2,11 @@
 Extracteur de cartes grises marocaines (Recto / Verso)
 - Recentrage ORB avant extraction (optionnel)
 - OCR par zones via template JSON
-- PaddleOCR uniquement
+- PaddleOCR + Tesseract selon config
 - Batch OCR FR / AR
 - Réduction des marges blanches autour du texte avant OCR
 - Séparation intelligente address_fr / address_ar
-- Conserve Normalize + transform_json + extract_ar
+- Détection double dash sur champs verso
 """
 
 import re
@@ -15,8 +15,11 @@ import unicodedata
 from typing import Dict, Any, List, Optional
 
 import cv2
+import pytesseract
+from pytesseract import Output
 from paddleocr import PaddleOCR
 
+from utils.ProcessImage import ProcessImage
 from utils.normalize import Normalize
 from config.CarteGriseRecenter import CarteGriseORBAligner
 
@@ -33,23 +36,12 @@ except ImportError:
 
 
 class CarteGriseExtractor:
-    """
-    Extracteur nouvelle génération :
-    1. Recentrage ORB (optionnel)
-    2. Extraction par zones template
-    3. Batch PaddleOCR FR / AR
-    """
-
-    # =========================
-    # CONFIG RECTO
-    # =========================
     FIELDS_KEY_RECTO = {
         "registration_number_matriculate": {
             "fr": "Numéro d'immatriculation",
             "ar": "رقم التسجيل",
             "normalise": "0-9أبدهوهـط-",
             "multi_line": False,
-            "extract_ar": True,
             "type": "center_value",
             "ocr": "ar"
         },
@@ -59,7 +51,7 @@ class CarteGriseExtractor:
             "normalise": "A-Z0-9",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract"
         },
         "first_registration_date": {
             "fr": "Première mise en circulation",
@@ -67,7 +59,7 @@ class CarteGriseExtractor:
             "normalise": "0-9/",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract"
         },
         "first_usage_date": {
             "fr": "M.C au maroc",
@@ -75,7 +67,7 @@ class CarteGriseExtractor:
             "normalise": "0-9/",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract"
         },
         "mutation_date": {
             "fr": "Mutation le",
@@ -83,7 +75,7 @@ class CarteGriseExtractor:
             "normalise": "0-9/",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract"
         },
         "usage": {
             "fr": "Usage",
@@ -113,13 +105,10 @@ class CarteGriseExtractor:
             "normalise": "0-9/",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract"
         }
     }
 
-    # =========================
-    # CONFIG VERSO
-    # =========================
     FIELDS_KEY_VERSO = {
         "Marque": {
             "fr": "Marque",
@@ -127,15 +116,17 @@ class CarteGriseExtractor:
             "normalise": "A-Za-z\\s_-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": False
         },
         "Type": {
             "fr": "Type",
             "ar": "الصنف",
-            "normalise": "A-Z0-9",
+            "normalise": "A-Z0-9-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract",
+            "detect_double_dash": True
         },
         "Genre": {
             "fr": "Genre",
@@ -143,7 +134,8 @@ class CarteGriseExtractor:
             "normalise": "A-Za-z_\\s-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": False
         },
         "Modèle": {
             "fr": "Modèle",
@@ -151,15 +143,17 @@ class CarteGriseExtractor:
             "normalise": "A-Za-z_\\s-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": True
         },
         "Type_Carburant": {
             "fr": "Type carburant",
             "ar": "نوع الوقود",
-            "normalise": "A-Za-z",
+            "normalise": "A-Za-z-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": False
         },
         "Number_chassis": {
             "fr": "N° du chassis",
@@ -167,7 +161,8 @@ class CarteGriseExtractor:
             "normalise": "A-Z0-9",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract",
+            "detect_double_dash": False
         },
         "Number_Cylinders": {
             "fr": "Nombre de cylindres",
@@ -175,7 +170,8 @@ class CarteGriseExtractor:
             "normalise": "0-9",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract",
+            "detect_double_dash": True
         },
         "Puissance_Fiscale": {
             "fr": "Puissance fiscale",
@@ -183,7 +179,8 @@ class CarteGriseExtractor:
             "normalise": "0-9",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract",
+            "detect_double_dash": False
         },
         "Number_Places": {
             "fr": "Nombre de places",
@@ -191,15 +188,17 @@ class CarteGriseExtractor:
             "normalise": "0-9",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract",
+            "detect_double_dash": True
         },
         "PTAC": {
             "fr": "P.T.A.C",
             "ar": "الوزن جمالي",
-            "normalise": "0-9kKgG\\s",
+            "normalise": "0-9kKgG\\s-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": True
         },
         "Poids_vide": {
             "fr": "Poids à vide",
@@ -207,15 +206,17 @@ class CarteGriseExtractor:
             "normalise": "0-9kKgG\\s",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": True
         },
         "PTRA": {
             "fr": "P.T.R.A",
             "ar": "الوزن الإجمالي مع المجرور",
-            "normalise": "0-9kKgG\\s-",
+            "normalise": "0-9kKgG\\s",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "fr",
+            "detect_double_dash": True
         },
         "Restrictions": {
             "fr": "Restrictions",
@@ -223,7 +224,8 @@ class CarteGriseExtractor:
             "normalise": "A-Za-z\u0600-\u06FF\\s\\-",
             "multi_line": False,
             "type": "center_value",
-            "ocr": "fr"
+            "ocr": "tesseract",
+            "detect_double_dash": True
         }
     }
 
@@ -281,19 +283,9 @@ class CarteGriseExtractor:
                 template_json_path=verso_template_json
             )
 
-    # =========================================================
-    # PaddleOCR singleton
-    # =========================================================
     def _get_paddle_reader(self, lang: str) -> PaddleOCR:
-        return (
-            CarteGriseExtractor._reader_ar
-            if lang == "ar"
-            else CarteGriseExtractor._reader_fr
-        )
+        return CarteGriseExtractor._reader_ar if lang == "ar" else CarteGriseExtractor._reader_fr
 
-    # =========================================================
-    # Utils image
-    # =========================================================
     @staticmethod
     def _ensure_bgr(img):
         if img is None or img.size == 0:
@@ -305,34 +297,48 @@ class CarteGriseExtractor:
         return img
 
     @staticmethod
-    def _resize_zone_fast(img, max_width=640):
-        if img is None or img.size == 0:
-            return img
-        h, w = img.shape[:2]
-        if w <= max_width:
-            return img
-        ratio = max_width / float(w)
-        new_h = max(1, int(h * ratio))
-        return cv2.resize(img, (max_width, new_h), interpolation=cv2.INTER_AREA)
+    def clean_invisible_chars(text):
+        if not text:
+            return text
+        return "".join(ch for ch in text if unicodedata.category(ch) != "Cf").strip()
+
+    @staticmethod
+    def _safe_text_join(words: List[str]) -> str:
+        words = [w.strip() for w in words if w and w.strip()]
+        return " ".join(words).strip()
+
+    @staticmethod
+    def _box_from_template_field(template_field: Dict, ref_w: int, ref_h: int) -> Dict:
+        x = int(template_field["x"] * ref_w)
+        y = int(template_field["y"] * ref_h)
+        w = int(template_field["w"] * ref_w)
+        h = int(template_field["h"] * ref_h)
+        return {"x": x, "y": y, "width": w, "height": h}
+
+    @staticmethod
+    def _shrink_box_vertical(box: Dict[str, int], top_ratio=0.0, bottom_ratio=0.0) -> Dict[str, int]:
+        h = box["height"]
+        dy_top = int(h * top_ratio)
+        dy_bottom = int(h * bottom_ratio)
+        y = box["y"] + dy_top
+        new_h = h - dy_top - dy_bottom
+        if new_h <= 0:
+            return box.copy()
+        return {"x": box["x"], "y": y, "width": box["width"], "height": new_h}
+
+    @staticmethod
+    def _crop_from_box(image, box: Dict[str, int]):
+        x, y, w, h = box["x"], box["y"], box["width"], box["height"]
+        return image[y:y + h, x:x + w]
 
     def _tight_crop_text(self, img):
-        """
-        Réduit les marges blanches autour du texte.
-        Fonction appliquée à chaque zone avant OCR.
-        """
         if img is None or img.size == 0:
             return img
 
         src = self._ensure_bgr(img)
         gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
-
-        # léger lissage pour stabiliser le seuil
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-        # texte noir -> blanc
         _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-        # nettoyage léger
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
 
@@ -341,7 +347,6 @@ class CarteGriseExtractor:
             return src
 
         x, y, w, h = cv2.boundingRect(coords)
-
         pad_x = max(4, int(w * 0.03))
         pad_y = max(4, int(h * 0.20))
 
@@ -375,29 +380,22 @@ class CarteGriseExtractor:
         return img
 
     def _detect_vertical_split(self, zone_img, default_ratio: float = 0.50) -> int:
-        """
-        Détecte la meilleure séparation verticale entre FR (gauche)
-        et AR (droite) en cherchant une vallée de pixels noirs.
-        """
         if zone_img is None or zone_img.size == 0:
             return int(zone_img.shape[1] * default_ratio) if zone_img is not None else 0
 
         img = self._ensure_bgr(zone_img)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
         _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
 
-        h, w = bw.shape
+        w = bw.shape[1]
         col_sum = bw.sum(axis=0).astype("float32")
-
         k = max(9, (w // 30) | 1)
         col_sum_smooth = cv2.GaussianBlur(col_sum.reshape(1, -1), (k, 1), 0).reshape(-1)
 
-        # Recherche centrée pour éviter qu'une adresse FR longue mange toute la zone
         x_min = int(w * 0.42)
         x_max = int(w * 0.62)
         if x_max <= x_min:
@@ -410,64 +408,6 @@ class CarteGriseExtractor:
             split_x = int(w * default_ratio)
 
         return split_x
-
-    # =========================================================
-    # Utils texte
-    # =========================================================
-    @staticmethod
-    def contains_arabic(text: str) -> bool:
-        return bool(re.search(r'[\u0600-\u06FF]', text or ""))
-
-    @staticmethod
-    def has_required_matricule_arabic_letter(text: str) -> bool:
-        return bool(re.search(r'[أبدهوهـط]', text or ""))
-
-    @staticmethod
-    def clean_invisible_chars(text):
-        if not text:
-            return text
-        return "".join(ch for ch in text if unicodedata.category(ch) != "Cf").strip()
-
-    @staticmethod
-    def _safe_text_join(words: List[str]) -> str:
-        words = [w.strip() for w in words if w and w.strip()]
-        return " ".join(words).strip()
-
-    @staticmethod
-    def _box_from_template_field(template_field: Dict, ref_w: int, ref_h: int) -> Dict:
-        x = int(template_field["x"] * ref_w)
-        y = int(template_field["y"] * ref_h)
-        w = int(template_field["w"] * ref_w)
-        h = int(template_field["h"] * ref_h)
-        return {
-            "x": x,
-            "y": y,
-            "width": w,
-            "height": h
-        }
-
-    @staticmethod
-    def _shrink_box_vertical(box: Dict[str, int], top_ratio=0.0, bottom_ratio=0.0) -> Dict[str, int]:
-        h = box["height"]
-        dy_top = int(h * top_ratio)
-        dy_bottom = int(h * bottom_ratio)
-
-        y = box["y"] + dy_top
-        new_h = h - dy_top - dy_bottom
-        if new_h <= 0:
-            return box.copy()
-
-        return {
-            "x": box["x"],
-            "y": y,
-            "width": box["width"],
-            "height": new_h
-        }
-
-    @staticmethod
-    def _crop_from_box(image, box: Dict[str, int]):
-        x, y, w, h = box["x"], box["y"], box["width"], box["height"]
-        return image[y:y + h, x:x + w]
 
     def _normalize_final_value(self, field_name: str, value: str, allowed_chars: str) -> str:
         if value is None:
@@ -485,6 +425,10 @@ class CarteGriseExtractor:
 
         return cleaned
 
+    @staticmethod
+    def has_required_matricule_arabic_letter(text: str) -> bool:
+        return bool(re.search(r'[أبدهوهـط]', text or ""))
+
     def _choose_best_matricule(self, candidates: List[Dict[str, Any]], field_name: str, pattern: str) -> Dict[str, Any]:
         cleaned_candidates = []
 
@@ -498,7 +442,7 @@ class CarteGriseExtractor:
                 cleaned_candidates.append({
                     "text": value,
                     "confidence": conf,
-                    "engine": c.get("engine", "paddleocr")
+                    "engine": c.get("engine", "ocr")
                 })
 
         if not cleaned_candidates:
@@ -512,9 +456,6 @@ class CarteGriseExtractor:
         cleaned_candidates.sort(key=lambda c: (c["confidence"], len(c["text"])), reverse=True)
         return cleaned_candidates[0]
 
-    # =========================================================
-    # OCR batch
-    # =========================================================
     def _extract_texts_from_predict_result(self, results) -> List[Dict[str, Any]]:
         extracted = []
 
@@ -527,7 +468,6 @@ class CarteGriseExtractor:
                     t = self.clean_invisible_chars(str(t))
                     if t:
                         texts.append(t)
-
                 for s in page.get("rec_scores", []):
                     try:
                         confs.append(float(s))
@@ -539,7 +479,6 @@ class CarteGriseExtractor:
                     t = self.clean_invisible_chars(str(t))
                     if t:
                         texts.append(t)
-
                 for s in getattr(page, "rec_scores", []):
                     try:
                         confs.append(float(s))
@@ -558,12 +497,7 @@ class CarteGriseExtractor:
                         pass
 
             conf = int(sum(confs) / len(confs) * 100) if confs else 0
-
-            extracted.append({
-                "text": self._safe_text_join(texts),
-                "confidence": conf,
-                "engine": "paddleocr"
-            })
+            extracted.append({"text": self._safe_text_join(texts), "confidence": conf, "engine": "paddleocr"})
 
         return extracted
 
@@ -571,22 +505,63 @@ class CarteGriseExtractor:
         if not images:
             return []
 
-        prepared = [self._prepare_zone_for_ocr(img, lang=lang) for img in images]
+        prepared = [self._prepare_zone_for_paddle(img, lang=lang) for img in images]
         reader = self._get_paddle_reader(lang)
         results = reader.predict(prepared)
         return self._extract_texts_from_predict_result(results)
 
-    # =========================================================
-    # Debug optionnel
-    # =========================================================
+    def _ocr_tesseract_zone(self, zone_img, field_name: str = "") -> Dict[str, Any]:
+        if zone_img is None or zone_img.size == 0:
+            return {"text": "", "confidence": 0, "engine": "tesseract"}
+
+        processed, _ = ProcessImage(image=zone_img).process("mode_cg_pytesseract")
+
+        whitelist = ""
+        if field_name.endswith("_date"):
+            whitelist = r" -c tessedit_char_whitelist=0123456789/"
+        elif "registration" in field_name or "chassis" in field_name or field_name in {
+            "Type", "Number_Cylinders", "Puissance_Fiscale", "Number_Places", "PTAC", "Poids_vide", "PTRA"
+        }:
+            whitelist = r" -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"
+
+        custom_config = rf'--oem 3 --psm 7{whitelist}'
+        data = pytesseract.image_to_data(processed, config=custom_config, output_type=Output.DICT)
+
+        words = []
+        confs = []
+        n = len(data["text"])
+
+        for i in range(n):
+            txt = self.clean_invisible_chars(data["text"][i])
+            if not txt:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except Exception:
+                conf = -1
+            if conf < 0:
+                continue
+
+            words.append(txt)
+            confs.append(conf)
+
+        avg_conf = int(sum(confs) / len(confs)) if confs else 0
+        return {"text": self._safe_text_join(words), "confidence": avg_conf, "engine": "tesseract"}
+
+    def _is_double_dash_zone(self, zone_img) -> bool:
+        try:
+            txt = ProcessImage(image=zone_img).process("detect_double_dash")
+            txt = (txt or "").strip()
+            txt = txt.replace(" ", "")
+            return txt in {"-", "--", "---", "—", "––"}
+        except Exception:
+            return False
+
     def _save_debug_zone(self, name: str, img):
         if img is None or img.size == 0:
             return
         cv2.imwrite(f"debug_{name}.jpg", img)
 
-    # =========================================================
-    # Main extraction
-    # =========================================================
     def extract(self, image_path: str, document_type: str, debug: bool = False):
         if document_type == "carte_grise_recto":
             self.config = self.CONF_RECTO
@@ -620,11 +595,9 @@ class CarteGriseExtractor:
                 min_matches=30,
                 debug=debug
             )
-
             field_crops = process_result["field_crops"]
             template = process_result["template"]
             meta = process_result["meta"]
-
         else:
             aligned_image = cv2.imread(image_path)
             if aligned_image is None:
@@ -632,8 +605,8 @@ class CarteGriseExtractor:
 
             ref_h, ref_w = aligned_image.shape[:2]
             template_fields = template["fields"]
-
             field_crops = {}
+
             for field_name in template_field_names:
                 field = template_fields.get(field_name)
                 if not field:
@@ -651,15 +624,6 @@ class CarteGriseExtractor:
                 "reference_height": ref_h,
                 "input_image": image_path,
                 "aligned_image_path": None,
-                "debug_enabled": False,
-                "debug_matches_image_path": None,
-                "debug_polygon_image_path": None,
-                "debug_fields_image_path": None,
-                "total_good_matches": None,
-                "inliers": None,
-                "homography": None,
-                "template_document": template.get("document"),
-                "template_json_path": None,
                 "orb_used": False
             }
 
@@ -672,35 +636,15 @@ class CarteGriseExtractor:
 
         def make_empty_item(field_conf):
             return {
-                "fr": {
-                    "key": field_conf["fr"],
-                    "value": "",
-                    "confidence": 0,
-                    "x": 0,
-                    "y": 0,
-                    "width": 0,
-                    "height": 0
-                },
-                "ar": {
-                    "key": field_conf["ar"],
-                    "value": "",
-                    "confidence": 0,
-                    "x": 0,
-                    "y": 0,
-                    "width": 0,
-                    "height": 0
-                }
+                "fr": {"key": field_conf["fr"], "value": "", "confidence": 0, "x": 0, "y": 0, "width": 0, "height": 0},
+                "ar": {"key": field_conf["ar"], "value": "", "confidence": 0, "x": 0, "y": 0, "width": 0, "height": 0}
             }
 
-        result_map = {
-            field_name: make_empty_item(field_conf)
-            for field_name, field_conf in fields_key.items()
-        }
+        result_map = {field_name: make_empty_item(field_conf) for field_name, field_conf in fields_key.items()}
 
         for field_name, field_conf in fields_key.items():
             pattern = field_conf["normalise"]
 
-            # owner => 2 zones fixes
             if field_name == "owner":
                 fr_zone_name = "owner_fr"
                 ar_zone_name = "owner_ar"
@@ -727,7 +671,6 @@ class CarteGriseExtractor:
                     })
                 continue
 
-            # address => 1 zone à splitter intelligemment
             if field_name == "address":
                 zone_name = "address"
                 zone = field_crops.get(zone_name)
@@ -750,7 +693,6 @@ class CarteGriseExtractor:
                 h, w = zone.shape[:2]
                 split_x = self._detect_vertical_split(zone, default_ratio=0.50)
 
-                # petite marge centrale pour éviter de prendre la colonne frontière
                 margin = max(6, int(w * 0.01))
                 fr_end = max(1, split_x - margin)
                 ar_start = min(w - 1, split_x + margin)
@@ -766,18 +708,8 @@ class CarteGriseExtractor:
                     self._save_debug_zone("address_ar", ar_zone)
                     self._save_debug_zone("address_split_visual", debug_zone)
 
-                fr_box = {
-                    "x": full_box["x"],
-                    "y": full_box["y"],
-                    "width": fr_end,
-                    "height": full_box["height"]
-                }
-                ar_box = {
-                    "x": full_box["x"] + ar_start,
-                    "y": full_box["y"],
-                    "width": full_box["width"] - ar_start,
-                    "height": full_box["height"]
-                }
+                fr_box = {"x": full_box["x"], "y": full_box["y"], "width": fr_end, "height": full_box["height"]}
+                ar_box = {"x": full_box["x"] + ar_start, "y": full_box["y"], "width": full_box["width"] - ar_start, "height": full_box["height"]}
 
                 fr_jobs.append({
                     "field_name": field_name,
@@ -795,14 +727,42 @@ class CarteGriseExtractor:
                 })
                 continue
 
-            # cas standard
             zone_name = field_name
             zone = field_crops.get(zone_name)
             if zone is None or zone_name not in template_fields:
                 continue
 
             box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
-            ocr_lang = field_conf.get("ocr", "fr")
+            ocr_mode = field_conf.get("ocr", "fr")
+
+            if field_conf.get("detect_double_dash", False) and self._is_double_dash_zone(zone):
+                result_map[field_name]["fr"].update({
+                    "value": "--",
+                    "confidence": 100,
+                    **box
+                })
+                result_map[field_name]["ar"].update({
+                    "value": "--",
+                    "confidence": 100,
+                    **box
+                })
+                continue
+
+            if ocr_mode == "tesseract":
+                tess_res = self._ocr_tesseract_zone(zone, field_name=field_name)
+                value = self._normalize_final_value(field_name, tess_res["text"], pattern)
+
+                result_map[field_name]["fr"].update({
+                    "value": value,
+                    "confidence": int(tess_res["confidence"]),
+                    **box
+                })
+                result_map[field_name]["ar"].update({
+                    "value": value,
+                    "confidence": int(tess_res["confidence"]),
+                    **box
+                })
+                continue
 
             if field_name == "registration_number_matriculate":
                 ar_jobs.append({
@@ -814,7 +774,7 @@ class CarteGriseExtractor:
                 })
                 continue
 
-            if ocr_lang == "ar":
+            if ocr_mode == "ar":
                 ar_jobs.append({
                     "field_name": field_name,
                     "slot": "both",
@@ -844,7 +804,7 @@ class CarteGriseExtractor:
                     "confidence": int(ocr_res["confidence"]),
                     **job["box"]
                 })
-            else:  # both
+            else:
                 result_map[field_name]["fr"].update({
                     "value": value,
                     "confidence": int(ocr_res["confidence"]),

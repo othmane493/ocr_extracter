@@ -5,11 +5,11 @@ Contient toutes les méthodes communes aux deux types de CIN
 import json
 import cv2
 import numpy as np
-import easyocr
+from paddleocr import PaddleOCR
 import re
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple, List, Any
-
+from utils.ProcessImage import ProcessImage
 from json_transformer import is_arabic
 
 
@@ -31,7 +31,7 @@ class CINExtractor(ABC):
         self.debug_image_path = "debug_zones.png"
 
         # Utiliser le reader EasyOCR partagé du singleton
-        if not hasattr(CINExtractor, '_reader_ar') or not hasattr(CINExtractor, '_reader_en') or CINExtractor._reader_ar is None or CINExtractor._reader_en is None:
+        if not hasattr(CINExtractor, '_reader_ar') or not hasattr(CINExtractor, '_reader_fr') or CINExtractor._reader_ar is None or CINExtractor._reader_fr is None:
             try:
                 # Essayer d'utiliser le singleton
                 import sys
@@ -40,15 +40,15 @@ class CINExtractor(ABC):
                 if parent_dir not in sys.path:
                     sys.path.insert(0, parent_dir)
 
-                from ocr_manager import get_easyocr_reader
-                CINExtractor._reader_ar, CINExtractor._reader_en = get_easyocr_reader()
+                from ocr_manager import get_paddle_reader
+                CINExtractor._reader_ar, CINExtractor._reader_fr = get_paddle_reader()
             except (ImportError, Exception):
                 # Fallback si le singleton n'est pas disponible
-                CINExtractor._reader_ar = easyocr.Reader(["ar"], gpu=False)
-                CINExtractor._reader_en = easyocr.Reader(["en"], gpu=False)
+                CINExtractor._reader_ar = PaddleOCR(lang="ar", use_angle_cls=False)
+                CINExtractor._reader_fr = PaddleOCR(lang="fr", use_angle_cls=False)
 
         self.reader_ar = CINExtractor._reader_ar
-        self.reader_en = CINExtractor._reader_en
+        self.reader_fr = CINExtractor._reader_fr
         self.template = None
         self.img = None
 
@@ -299,7 +299,6 @@ class CINExtractor(ABC):
                 cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 cv2.putText(debug_img, field, (x, y - 5),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-
             # Extraction avec Tesseract
             zone_preprocessed = self.preprocess_zone(zone)
             blocks = self.extract_text_tesseract(zone_preprocessed)
@@ -332,6 +331,9 @@ class CINExtractor(ABC):
             results[field] = ocr_text
 
         # Sauvegarde debug
+        if self.debug:
+            cv2.imwrite("debug_all_zones.jpg", debug_img)
+
         self.create_debug_image(debug_img, results)
 
         # Réorganisation des champs

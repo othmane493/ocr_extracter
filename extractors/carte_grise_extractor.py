@@ -1,9 +1,8 @@
 """
-Nouvel extracteur de cartes grises marocaines (Recto / Verso)
+Extracteur de cartes grises marocaines (Recto / Verso)
 - Recentrage ORB avant extraction (optionnel)
 - OCR par zones via template JSON
-- Tesseract en parallèle
-- EasyOCR en fallback
+- PaddleOCR uniquement
 - Conserve Normalize + transform_json + extract_ar
 """
 
@@ -11,11 +10,9 @@ import re
 import json
 import unicodedata
 from typing import Dict, Any, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
-import pytesseract
-from pytesseract import Output
+from paddleocr import PaddleOCR
 
 from utils.ProcessImage import ProcessImage
 from utils.normalize import Normalize
@@ -38,13 +35,8 @@ class CarteGriseExtractor:
     Extracteur nouvelle génération :
     1. Recentrage ORB (optionnel)
     2. Extraction par zones template
-    3. Tesseract en parallèle
-    4. EasyOCR en fallback
+    3. PaddleOCR par zone
     """
-
-    THRESHOLD_TESSERACT_GOOD = 70
-    THRESHOLD_EASYOCR_GOOD = 0.69
-    MAX_WORKERS = 4
 
     # =========================
     # CONFIG RECTO
@@ -132,7 +124,6 @@ class CarteGriseExtractor:
             "ar": "الصنف",
             "normalise": "A-Z0-9",
             "multi_line": False,
-            "enable_easy_ocr": False,
             "type": "center_value"
         },
         "Genre": {
@@ -225,11 +216,26 @@ class CarteGriseExtractor:
         verso_reference_image: Optional[str] = None,
         gpu: bool = False
     ):
-        self.reader_ar = None
-        self.reader_en = None
         self.gpu = gpu
         self.config = None
+        if not hasattr(CarteGriseExtractor, "_reader_fr"):
+            CarteGriseExtractor._reader_fr = None
+        if not hasattr(CarteGriseExtractor, "_reader_ar"):
+            CarteGriseExtractor._reader_ar = None
 
+        if CarteGriseExtractor._reader_fr is None:
+            CarteGriseExtractor._reader_fr = PaddleOCR(
+                lang="fr",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False
+            )
+
+        if CarteGriseExtractor._reader_ar is None:
+            CarteGriseExtractor._reader_ar = PaddleOCR(
+                lang="ar",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False
+            )
         with open(recto_template_json, "r", encoding="utf-8") as f:
             self.recto_template = json.load(f)
 
@@ -252,22 +258,169 @@ class CarteGriseExtractor:
             )
 
     # =========================================================
-    # EasyOCR singleton
+    # PaddleOCR singleton
     # =========================================================
-    def _get_easyocr_reader(self):
-        if self.reader_en is None or self.reader_ar is None:
-            try:
-                from ocr_manager import get_easyocr_reader
-                self.reader_ar, self.reader_en = get_easyocr_reader()
-            except ImportError:
-                import easyocr
-                self.reader_ar = easyocr.Reader(["ar"], gpu=self.gpu)
-                self.reader_en = easyocr.Reader(["en"], gpu=self.gpu)
-        return self.reader_ar, self.reader_en
+    def _get_paddle_reader(self, lang: str) -> PaddleOCR:
+        return (
+            CarteGriseExtractor._reader_ar
+            if lang == "ar"
+            else CarteGriseExtractor._reader_fr
+        )
 
+    def _ocr_paddle_zone(self, zone_img, lang: str = "fr") -> Dict[str, Any]:
+        if zone_img is None or zone_img.size == 0:
+            return {"text": "", "confidence": 0, "engine": "paddleocr"}
+
+        processed = zone_img
+
+        if len(processed.shape) == 2:
+            processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+        elif len(processed.shape) == 3 and processed.shape[2] == 4:
+            processed = cv2.cvtColor(processed, cv2.COLOR_BGRA2BGR)
+
+        reader = self._get_paddle_reader(lang)
+
+        # pour debug
+        results = reader.predict(processed)
+
+        texts = []
+        confs = []
+
+        for page in results:
+            # cas dict
+            if isinstance(page, dict):
+                for t in page.get("rec_texts", []):
+                    t = self.clean_invisible_chars(str(t))
+                    if t:
+                        texts.append(t)
+
+                for s in page.get("rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            # cas objet avec attributs
+            elif hasattr(page, "rec_texts") or hasattr(page, "rec_scores"):
+                for t in getattr(page, "rec_texts", []):
+                    t = self.clean_invisible_chars(str(t))
+                    if t:
+                        texts.append(t)
+
+                for s in getattr(page, "rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            # cas ancien format liste/tuple
+            elif isinstance(page, (list, tuple)):
+                for item in page:
+                    try:
+                        text = item[1][0]
+                        score = item[1][1]
+                        text = self.clean_invisible_chars(str(text))
+                        if text:
+                            texts.append(text)
+                            confs.append(float(score))
+                    except Exception:
+                        pass
+
+        conf = int(sum(confs) / len(confs) * 100) if confs else 0
+
+        return {
+            "text": self._safe_text_join(texts),
+            "confidence": conf,
+            "engine": "paddleocr"
+        }
     # =========================================================
     # Utils
     # =========================================================
+
+    @staticmethod
+    def contains_arabic(text: str) -> bool:
+        return bool(re.search(r'[\u0600-\u06FF]', text or ""))
+
+    @staticmethod
+    def has_required_matricule_arabic_letter(text: str) -> bool:
+        return bool(re.search(r'[أبدهوهـط]', text or ""))
+
+    @staticmethod
+    def _ensure_bgr(img):
+        if img is None or img.size == 0:
+            return img
+        if len(img.shape) == 2:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        if len(img.shape) == 3 and img.shape[2] == 4:
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        return img
+
+    @staticmethod
+    def _resize_zone_fast(img, max_width=640):
+        if img is None or img.size == 0:
+            return img
+        h, w = img.shape[:2]
+        if w <= max_width:
+            return img
+        ratio = max_width / float(w)
+        new_h = max(1, int(h * ratio))
+        return cv2.resize(img, (max_width, new_h), interpolation=cv2.INTER_AREA)
+
+    def _prepare_zone_for_ocr(self, zone_img):
+        img = self._ensure_bgr(zone_img)
+        img = self._resize_zone_fast(img, max_width=640)
+        return img
+
+    @staticmethod
+    def _shrink_box_vertical(box: Dict[str, int], top_ratio=0.0, bottom_ratio=0.0) -> Dict[str, int]:
+        h = box["height"]
+        dy_top = int(h * top_ratio)
+        dy_bottom = int(h * bottom_ratio)
+
+        y = box["y"] + dy_top
+        new_h = h - dy_top - dy_bottom
+        if new_h <= 0:
+            return box.copy()
+
+        return {
+            "x": box["x"],
+            "y": y,
+            "width": box["width"],
+            "height": new_h
+        }
+
+    @staticmethod
+    def _crop_from_box(image, box: Dict[str, int]):
+        x, y, w, h = box["x"], box["y"], box["width"], box["height"]
+        return image[y:y + h, x:x + w]
+
+    def _choose_best_matricule(self, candidates: List[Dict[str, Any]], field_name: str, pattern: str) -> Dict[str, Any]:
+        cleaned_candidates = []
+
+        for c in candidates:
+            raw = c.get("text", "")
+            conf = int(c.get("confidence", 0))
+            value = self._normalize_final_value(field_name, raw, pattern)
+            value = re.sub(r"\s+", "", value or "").strip()
+
+            if value:
+                cleaned_candidates.append({
+                    "text": value,
+                    "confidence": conf,
+                    "engine": c.get("engine", "paddleocr")
+                })
+
+        if not cleaned_candidates:
+            return {"text": "", "confidence": 0, "engine": "none"}
+
+        with_ar = [c for c in cleaned_candidates if self.has_required_matricule_arabic_letter(c["text"])]
+        if with_ar:
+            with_ar.sort(key=lambda c: (c["confidence"], len(c["text"])), reverse=True)
+            return with_ar[0]
+
+        cleaned_candidates.sort(key=lambda c: (c["confidence"], len(c["text"])), reverse=True)
+        return cleaned_candidates[0]
+
     @staticmethod
     def clean_invisible_chars(text):
         if not text:
@@ -299,6 +452,67 @@ class CarteGriseExtractor:
             "height": h
         }
 
+    def _extract_texts_from_predict_result(self, results) -> List[Dict[str, Any]]:
+        extracted = []
+
+        for page in results:
+            texts = []
+            confs = []
+
+            if isinstance(page, dict):
+                for t in page.get("rec_texts", []):
+                    t = self.clean_invisible_chars(str(t))
+                    if t:
+                        texts.append(t)
+
+                for s in page.get("rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            elif hasattr(page, "rec_texts") or hasattr(page, "rec_scores"):
+                for t in getattr(page, "rec_texts", []):
+                    t = self.clean_invisible_chars(str(t))
+                    if t:
+                        texts.append(t)
+
+                for s in getattr(page, "rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            elif isinstance(page, (list, tuple)):
+                for item in page:
+                    try:
+                        text = self.clean_invisible_chars(str(item[1][0]))
+                        score = float(item[1][1])
+                        if text:
+                            texts.append(text)
+                            confs.append(score)
+                    except Exception:
+                        pass
+
+            conf = int(sum(confs) / len(confs) * 100) if confs else 0
+
+            extracted.append({
+                "text": self._safe_text_join(texts),
+                "confidence": conf,
+                "engine": "paddleocr"
+            })
+
+        return extracted
+
+    def _ocr_paddle_batch(self, images: List, lang: str = "fr") -> List[Dict[str, Any]]:
+        if not images:
+            return []
+
+        prepared = [self._prepare_zone_for_ocr(img) for img in images]
+        reader = self._get_paddle_reader(lang)
+        results = reader.predict(prepared)
+        return self._extract_texts_from_predict_result(results)
+
     def _normalize_final_value(self, field_name: str, value: str, allowed_chars: str) -> str:
         if value is None:
             return value
@@ -316,119 +530,11 @@ class CarteGriseExtractor:
         return cleaned
 
     # =========================================================
-    # OCR Tesseract
-    # =========================================================
-    def _ocr_tesseract_zone(self, zone_img, lang: str = "fra+ara", psm: int = 6) -> Dict[str, Any]:
-        processed, _ = ProcessImage(image=zone_img).process("mode_cg_pytesseract")
-
-        custom_config = rf'--oem 3 --psm {psm} -l {lang}'
-        data = pytesseract.image_to_data(
-            processed,
-            config=custom_config,
-            output_type=Output.DICT
-        )
-
-        words = []
-        confs = []
-
-        n = len(data["text"])
-        for i in range(n):
-            txt = self.clean_invisible_chars(data["text"][i])
-            if not txt:
-                continue
-            try:
-                conf = float(data["conf"][i])
-            except Exception:
-                conf = -1
-            if conf < 0:
-                continue
-
-            words.append(txt)
-            confs.append(conf)
-
-        return {
-            "text": self._safe_text_join(words),
-            "confidence": self._avg_conf(confs),
-            "engine": "tesseract"
-        }
-
-    # =========================================================
-    # OCR EasyOCR
-    # =========================================================
-    def _ocr_easyocr_zone(self, zone_img, lang: str = "en") -> Dict[str, Any]:
-        reader_ar, reader_en = self._get_easyocr_reader()
-        processed = ProcessImage(image=zone_img).process("mode_cg_easyocr")
-
-        reader = reader_ar if lang == "ar" else reader_en
-        results = reader.readtext(processed, detail=1, paragraph=True)
-
-        if not results:
-            return {
-                "text": "",
-                "confidence": 0,
-                "engine": "easyocr"
-            }
-
-        words = []
-        confs = []
-
-        for item in results:
-            if len(item) >= 3:
-                _, text, conf = item
-                text = self.clean_invisible_chars(text)
-                if text:
-                    words.append(text)
-                    confs.append(conf)
-
-        avg_conf = 0
-        if confs:
-            avg_conf = int((sum(confs) / len(confs)) * 100)
-
-        return {
-            "text": self._safe_text_join(words),
-            "confidence": avg_conf,
-            "engine": "easyocr"
-        }
-
-    # =========================================================
     # OCR selection
     # =========================================================
-    def _best_text_result(
-        self,
-        zone_img,
-        field_name: str,
-        field_conf: Dict,
-        lang_mode: str = "mixed"
-    ) -> Dict[str, Any]:
-        allow_easyocr = field_conf.get("enable_easy_ocr", True)
-
-        if lang_mode == "ar":
-            tess_lang = "ara"
-            easy_lang = "ar"
-        elif lang_mode == "latin":
-            tess_lang = "fra"
-            easy_lang = "en"
-        else:
-            tess_lang = "fra+ara"
-            easy_lang = "en"
-
-        tess = self._ocr_tesseract_zone(zone_img, lang=tess_lang, psm=6)
-
-        if tess["text"] and tess["confidence"] >= self.THRESHOLD_TESSERACT_GOOD:
-            return tess
-
-        if not allow_easyocr:
-            return tess
-
-        easy = self._ocr_easyocr_zone(zone_img, lang=easy_lang)
-
-        if easy["text"] and easy["confidence"] > tess["confidence"]:
-            return easy
-
-        if not tess["text"] and easy["text"]:
-            return easy
-
-        return tess
+    def _best_text_result(self, zone_img, lang_mode: str = "fr") -> Dict[str, Any]:
+        lang = "ar" if lang_mode == "ar" else "fr"
+        return self._ocr_paddle_zone(zone_img, lang=lang)
 
     # =========================================================
     # Extraction d'un champ logique
@@ -468,19 +574,17 @@ class CarteGriseExtractor:
 
         result = make_empty_item()
 
-        # owner => 2 zones
         if field_name == "owner":
             fr_zone_name = "owner_fr"
             ar_zone_name = "owner_ar"
 
             fr_zone = field_crops.get(fr_zone_name)
             ar_zone = field_crops.get(ar_zone_name)
-
             fr_box = self._box_from_template_field(template_fields[fr_zone_name], ref_w, ref_h)
             ar_box = self._box_from_template_field(template_fields[ar_zone_name], ref_w, ref_h)
 
             if fr_zone is not None:
-                fr_res = self._best_text_result(fr_zone, field_name, field_conf, lang_mode="latin")
+                fr_res = self._best_text_result(fr_zone, lang_mode="fr")
                 fr_val = self._normalize_final_value(field_name, fr_res["text"], pattern)
                 result["fr"].update({
                     "value": fr_val,
@@ -489,7 +593,7 @@ class CarteGriseExtractor:
                 })
 
             if ar_zone is not None:
-                ar_res = self._best_text_result(ar_zone, field_name, field_conf, lang_mode="ar")
+                ar_res = self._best_text_result(ar_zone, lang_mode="ar")
                 ar_val = self._normalize_final_value(field_name, ar_res["text"], pattern)
                 result["ar"].update({
                     "value": ar_val,
@@ -499,15 +603,47 @@ class CarteGriseExtractor:
 
             return result
 
-        # address => 1 zone unique, OCR double
         if field_name == "address":
             zone_name = "address"
             zone = field_crops.get(zone_name)
-            box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
+
+            if zone_name not in template_fields:
+                return result
+
+            full_box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
 
             if zone is not None:
-                fr_res = self._best_text_result(zone, field_name, field_conf, lang_mode="latin")
-                ar_res = self._best_text_result(zone, field_name, field_conf, lang_mode="ar")
+                full_box = self._shrink_box_vertical(full_box, top_ratio=0.18, bottom_ratio=0.03)
+
+                zone = self._crop_from_box(zone, {
+                    "x": 0,
+                    "y": int(zone.shape[0] * 0.18),
+                    "width": zone.shape[1],
+                    "height": max(1, int(zone.shape[0] * (1 - 0.18 - 0.03)))
+                })
+
+                h, w = zone.shape[:2]
+                split_x = int(w * 0.55)
+
+                fr_zone = zone[:, :split_x]
+                ar_zone = zone[:, split_x:]
+
+                fr_box = {
+                    "x": full_box["x"],
+                    "y": full_box["y"],
+                    "width": split_x,
+                    "height": full_box["height"]
+                }
+
+                ar_box = {
+                    "x": full_box["x"] + split_x,
+                    "y": full_box["y"],
+                    "width": full_box["width"] - split_x,
+                    "height": full_box["height"]
+                }
+
+                fr_res = self._best_text_result(fr_zone, lang_mode="fr")
+                ar_res = self._best_text_result(ar_zone, lang_mode="ar")
 
                 fr_val = self._normalize_final_value(field_name, fr_res["text"], pattern)
                 ar_val = self._normalize_final_value(field_name, ar_res["text"], pattern)
@@ -515,17 +651,16 @@ class CarteGriseExtractor:
                 result["fr"].update({
                     "value": fr_val,
                     "confidence": int(fr_res["confidence"]),
-                    **box
+                    **fr_box
                 })
                 result["ar"].update({
                     "value": ar_val,
                     "confidence": int(ar_res["confidence"]),
-                    **box
+                    **ar_box
                 })
 
             return result
 
-        # cas standard => 1 zone unique
         zone_name = field_name
         zone = field_crops.get(zone_name)
         if zone is None or zone_name not in template_fields:
@@ -533,11 +668,34 @@ class CarteGriseExtractor:
 
         box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
 
-        fr_res = self._best_text_result(zone, field_name, field_conf, lang_mode="mixed")
+        if field_name == "registration_number_matriculate" and field_conf.get("extract_ar", False):
+            fr_res = self._best_text_result(zone, lang_mode="fr")
+            ar_res = self._best_text_result(zone, lang_mode="ar")
+
+            best_res = self._choose_best_matricule(
+                candidates=[fr_res, ar_res],
+                field_name=field_name,
+                pattern=pattern
+            )
+            best_val = self._normalize_final_value(field_name, best_res["text"], pattern)
+
+            result["fr"].update({
+                "value": best_val,
+                "confidence": int(best_res["confidence"]),
+                **box
+            })
+            result["ar"].update({
+                "value": best_val,
+                "confidence": int(best_res["confidence"]),
+                **box
+            })
+            return result
+
+        fr_res = self._best_text_result(zone, lang_mode="fr")
         fr_val = self._normalize_final_value(field_name, fr_res["text"], pattern)
 
         if field_conf.get("extract_ar", False):
-            ar_res = self._best_text_result(zone, field_name, field_conf, lang_mode="ar")
+            ar_res = self._best_text_result(zone, lang_mode="ar")
             ar_val = self._normalize_final_value(field_name, ar_res["text"], pattern)
         else:
             ar_res = fr_res
@@ -561,16 +719,6 @@ class CarteGriseExtractor:
     # Main extraction
     # =========================================================
     def extract(self, image_path: str, document_type: str, debug: bool = False):
-        """
-        Nouveau pipeline :
-        1. Recentrage ORB (optionnel)
-        2. Crop des zones via template
-        3. OCR par champ en parallèle
-        4. Fallback EasyOCR intégré
-        5. transform_json final
-        """
-
-        # Choix config + template + aligner
         if document_type == "carte_grise_recto":
             self.config = self.CONF_RECTO
             aligner = self.aligner_recto
@@ -584,7 +732,6 @@ class CarteGriseExtractor:
 
         fields_key = self.config["FIELDS_KEY"]
 
-        # Champs template nécessaires
         template_field_names = []
         for field_name in fields_key.keys():
             if field_name == "owner":
@@ -592,7 +739,6 @@ class CarteGriseExtractor:
             else:
                 template_field_names.append(field_name)
 
-        # AVEC ORB
         if aligner is not None:
             process_result = aligner.process_card(
                 input_image_path=image_path,
@@ -610,11 +756,7 @@ class CarteGriseExtractor:
             field_crops = process_result["field_crops"]
             template = process_result["template"]
             meta = process_result["meta"]
-            debug_matches_image = process_result["debug_matches_image"]
-            debug_polygon_image = process_result["debug_polygon_image"]
-            debug_fields_image = process_result["debug_fields_image"]
 
-        # SANS ORB
         else:
             aligned_image = cv2.imread(image_path)
             if aligned_image is None:
@@ -652,53 +794,186 @@ class CarteGriseExtractor:
                 "template_json_path": None,
                 "orb_used": False
             }
-            debug_matches_image = None
-            debug_polygon_image = None
-            debug_fields_image = None
 
         template_fields = template["fields"]
         ref_w = meta["reference_width"]
         ref_h = meta["reference_height"]
 
-        # Extraction parallèle par champ
-        parsed_data = []
-        futures = []
+        fr_jobs = []
+        ar_jobs = []
 
-        with ThreadPoolExecutor(max_workers=min(self.MAX_WORKERS, max(1, len(fields_key)))) as executor:
-            for field_name, field_conf in fields_key.items():
-                futures.append(
-                    executor.submit(
-                        self._extract_logical_field,
-                        field_name,
-                        field_conf,
-                        field_crops,
-                        template_fields,
-                        ref_w,
-                        ref_h
-                    )
-                )
+        def make_empty_item(field_conf):
+            return {
+                "fr": {
+                    "key": field_conf["fr"],
+                    "value": "",
+                    "confidence": 0,
+                    "x": 0,
+                    "y": 0,
+                    "width": 0,
+                    "height": 0
+                },
+                "ar": {
+                    "key": field_conf["ar"],
+                    "value": "",
+                    "confidence": 0,
+                    "x": 0,
+                    "y": 0,
+                    "width": 0,
+                    "height": 0
+                }
+            }
 
-            for future in as_completed(futures):
-                parsed_data.append(future.result())
+        result_map = {field_name: make_empty_item(field_conf) for field_name, field_conf in fields_key.items()}
 
-        # Garder l'ordre du config initial
-        ordered_data = []
-        parsed_map = {}
+        for field_name, field_conf in fields_key.items():
+            pattern = field_conf["normalise"]
 
-        for item in parsed_data:
-            fr_key = item["fr"]["key"]
-            matched_field = None
-            for k, v in fields_key.items():
-                if v["fr"] == fr_key:
-                    matched_field = k
-                    break
-            if matched_field:
-                parsed_map[matched_field] = item
+            if field_name == "owner":
+                fr_zone_name = "owner_fr"
+                ar_zone_name = "owner_ar"
 
-        for field_name in fields_key.keys():
-            if field_name in parsed_map:
-                ordered_data.append(parsed_map[field_name])
+                fr_zone = field_crops.get(fr_zone_name)
+                ar_zone = field_crops.get(ar_zone_name)
 
+                if fr_zone is not None:
+                    fr_jobs.append({
+                        "field_name": field_name,
+                        "slot": "fr",
+                        "pattern": pattern,
+                        "box": self._box_from_template_field(template_fields[fr_zone_name], ref_w, ref_h),
+                        "image": fr_zone
+                    })
+
+                if ar_zone is not None:
+                    ar_jobs.append({
+                        "field_name": field_name,
+                        "slot": "ar",
+                        "pattern": pattern,
+                        "box": self._box_from_template_field(template_fields[ar_zone_name], ref_w, ref_h),
+                        "image": ar_zone
+                    })
+                continue
+
+            if field_name == "address":
+                zone_name = "address"
+                zone = field_crops.get(zone_name)
+                if zone is None or zone_name not in template_fields:
+                    continue
+
+                full_box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
+                full_box = self._shrink_box_vertical(full_box, top_ratio=0.18, bottom_ratio=0.03)
+
+                zone = self._crop_from_box(zone, {
+                    "x": 0,
+                    "y": int(zone.shape[0] * 0.18),
+                    "width": zone.shape[1],
+                    "height": max(1, int(zone.shape[0] * (1 - 0.18 - 0.03)))
+                })
+
+                h, w = zone.shape[:2]
+                split_x = int(w * 0.50)
+
+                fr_zone = zone[:, :split_x]
+                ar_zone = zone[:, split_x:]
+
+                fr_box = {
+                    "x": full_box["x"],
+                    "y": full_box["y"],
+                    "width": split_x,
+                    "height": full_box["height"]
+                }
+                ar_box = {
+                    "x": full_box["x"] + split_x,
+                    "y": full_box["y"],
+                    "width": full_box["width"] - split_x,
+                    "height": full_box["height"]
+                }
+
+                fr_jobs.append({
+                    "field_name": field_name,
+                    "slot": "fr",
+                    "pattern": pattern,
+                    "box": fr_box,
+                    "image": fr_zone
+                })
+                ar_jobs.append({
+                    "field_name": field_name,
+                    "slot": "ar",
+                    "pattern": pattern,
+                    "box": ar_box,
+                    "image": ar_zone
+                })
+                continue
+
+            zone_name = field_name
+            zone = field_crops.get(zone_name)
+            if zone is None or zone_name not in template_fields:
+                continue
+
+            box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
+
+            if field_name == "registration_number_matriculate":
+                ar_jobs.append({
+                    "field_name": field_name,
+                    "slot": "both",
+                    "pattern": pattern,
+                    "box": box,
+                    "image": zone
+                })
+                continue
+
+            fr_jobs.append({
+                "field_name": field_name,
+                "slot": "fr",
+                "pattern": pattern,
+                "box": box,
+                "image": zone
+            })
+
+        fr_results = self._ocr_paddle_batch([job["image"] for job in fr_jobs], lang="fr")
+        ar_results = self._ocr_paddle_batch([job["image"] for job in ar_jobs], lang="ar")
+
+        for job, ocr_res in zip(fr_jobs, fr_results):
+            field_name = job["field_name"]
+            value = self._normalize_final_value(field_name, ocr_res["text"], job["pattern"])
+
+            result_map[field_name]["fr"].update({
+                "value": value,
+                "confidence": int(ocr_res["confidence"]),
+                **job["box"]
+            })
+
+            # par défaut, copier FR vers AR pour les champs non arabes
+            if field_name not in ("owner", "address", "registration_number_matriculate"):
+                result_map[field_name]["ar"].update({
+                    "value": value,
+                    "confidence": int(ocr_res["confidence"]),
+                    **job["box"]
+                })
+
+        for job, ocr_res in zip(ar_jobs, ar_results):
+            field_name = job["field_name"]
+            value = self._normalize_final_value(field_name, ocr_res["text"], job["pattern"])
+
+            if job["slot"] == "ar":
+                result_map[field_name]["ar"].update({
+                    "value": value,
+                    "confidence": int(ocr_res["confidence"]),
+                    **job["box"]
+                })
+            elif job["slot"] == "both":
+                result_map[field_name]["fr"].update({
+                    "value": value,
+                    "confidence": int(ocr_res["confidence"]),
+                    **job["box"]
+                })
+                result_map[field_name]["ar"].update({
+                    "value": value,
+                    "confidence": int(ocr_res["confidence"]),
+                    **job["box"]
+                })
+
+        ordered_data = [result_map[field_name] for field_name in fields_key.keys()]
         transformed_data = transform_json(ordered_data)
-
         return transformed_data

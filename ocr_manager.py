@@ -2,16 +2,15 @@
 Gestionnaire singleton pour les modèles OCR
 Initialise EasyOCR et Tesseract une seule fois
 """
-import easyocr
 import time
-
+from paddleocr import PaddleOCR
 
 class OCRManager:
     """Singleton pour gérer les modèles OCR"""
 
     _instance = None
     _reader_ar = None
-    _reader_en = None
+    _reader_fr = None
     _initialized = False
     
     def __new__(cls):
@@ -26,9 +25,8 @@ class OCRManager:
             start = time.time()
             
             # Initialiser EasyOCR
-            OCRManager._reader_ar = easyocr.Reader(["ar"], gpu=False)
-            OCRManager._reader_en = easyocr.Reader(["en"], gpu=False)
-
+            OCRManager._reader_ar = PaddleOCR(lang="ar", use_angle_cls=False)
+            OCRManager._reader_fr = PaddleOCR(lang="fr", use_angle_cls=False)
             elapsed = time.time() - start
             print(f"Modèles OCR chargés en {elapsed:.2f}s")
             OCRManager._initialized = True
@@ -36,9 +34,9 @@ class OCRManager:
     @classmethod
     def get_reader(cls):
         """Retourne l'instance EasyOCR (partagée)"""
-        if cls._reader_ar is None or cls._reader_en is None:
+        if cls._reader_ar is None or cls._reader_fr is None:
             cls()  # Force l'initialisation
-        return cls._reader_ar, cls._reader_en
+        return cls._reader_ar, cls._reader_fr
     
     @classmethod
     def is_ready(cls):
@@ -50,7 +48,7 @@ class OCRManager:
 _ocr_manager = OCRManager()
 
 
-def get_easyocr_reader():
+def get_paddle_reader():
     """
     Fonction utilitaire pour obtenir le reader EasyOCR
     Utilise toujours la même instance

@@ -124,7 +124,10 @@ def extract_document():
             extractor = CINExtractor()
             result = extractor.extract(filepath, document_type)
         else:  # carte_grise_recto ou carte_grise_verso
-            extractor = CarteGriseExtractor()
+            extractor = CarteGriseExtractor(
+                recto_template_json="config/carte_grise_recto_template.json",
+                verso_template_json="config/carte_grise_verso_template.json"
+            )
             result = extractor.extract(filepath, document_type)
 
         extraction_time = time.time() - extraction_start

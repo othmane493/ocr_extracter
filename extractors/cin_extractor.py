@@ -46,7 +46,7 @@ class CINExtractor:
         data = extract_cin(
             image_path,
             cin_type=detected_type,
-            debug=False  # Pas de debug en production
+            debug=True  # Pas de debug en production
         )
 
         return data

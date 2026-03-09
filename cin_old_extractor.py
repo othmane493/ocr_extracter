@@ -51,7 +51,6 @@ class CINOldExtractor(CINExtractor):
         Returns:
             Zone prétraitée et agrandie
         """
-        cv2.imwrite("test5.jpg", zone)
         # Agrandissement 3x pour améliorer la qualité
         img_big = cv2.resize(zone, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(img_big, cv2.COLOR_BGR2GRAY)
@@ -64,7 +63,6 @@ class CINOldExtractor(CINExtractor):
         sharpened = cv2.addWeighted(gray, 2.1, gray, -0.5, 0)
         # Binarisation avec Otsu
         _, thresh = cv2.threshold(gray, 146, 100, cv2.MORPH_DIAMOND)
-        cv2.imwrite("test1.jpg", thresh)
         return thresh
     
     def preprocessing_alternative(self, img: np.ndarray) -> np.ndarray:

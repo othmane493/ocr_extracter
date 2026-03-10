@@ -882,7 +882,7 @@ class CarteGriseExtractor:
     def _save_debug_zone(self, name: str, img):
         if img is None or img.size == 0:
             return
-        cv2.imwrite(f"debug_{name}.jpg", img)
+        #cv2.imwrite(f"debug_{name}.jpg", img)
 
     def extract(self, image_path: str, document_type: str, debug: bool = False, return_profile: bool = False):
         timings = {}

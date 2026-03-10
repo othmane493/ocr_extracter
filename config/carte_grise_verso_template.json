@@ -1,0 +1,128 @@
+{
+  "document": "CARTE_GRISE_MAROC_VERSO",
+  "width": 1680,
+  "height": 1058,
+  "fields": {
+    "Marque": {
+      "x": 0.422,
+      "y": 0.0161,
+      "w": 0.3857,
+      "h": 0.0681,
+      "lang": "mixed"
+    },
+    "Type": {
+      "x": 0.3857,
+      "y": 0.0784,
+      "w": 0.4994,
+      "h": 0.0614,
+      "lang": "mixed"
+    },
+    "Genre": {
+      "x": 0.403,
+      "y": 0.1342,
+      "w": 0.4988,
+      "h": 0.0662,
+      "lang": "mixed"
+    },
+    "Modèle": {
+      "x": 0.4185,
+      "y": 0.1947,
+      "w": 0.4577,
+      "h": 0.0662,
+      "lang": "mixed"
+    },
+    "Type_Carburant": {
+      "x": 0.5036,
+      "y": 0.2552,
+      "w": 0.3411,
+      "h": 0.0652,
+      "lang": "mixed"
+    },
+    "Number_chassis": {
+      "x": 0.478,
+      "y": 0.3147,
+      "w": 0.2821,
+      "h": 0.0624,
+      "lang": "mixed"
+    },
+    "Number_Cylinders": {
+      "x": 0.5679,
+      "y": 0.3715,
+      "w": 0.2244,
+      "h": 0.0652,
+      "lang": "mixed"
+    },
+    "Puissance_Fiscale": {
+      "x": 0.5161,
+      "y": 0.431,
+      "w": 0.3,
+      "h": 0.0652,
+      "lang": "mixed"
+    },
+    "Number_Places": {
+      "x": 0.5381,
+      "y": 0.4905,
+      "w": 0.3036,
+      "h": 0.0709,
+      "lang": "mixed"
+    },
+    "PTAC": {
+      "x": 0.4113,
+      "y": 0.5586,
+      "w": 0.3982,
+      "h": 0.0614,
+      "lang": "mixed"
+    },
+    "Poids_vide": {
+      "x": 0.4667,
+      "y": 0.6144,
+      "w": 0.3161,
+      "h": 0.0595,
+      "lang": "mixed"
+    },
+    "PTRA": {
+      "x": 0.4089,
+      "y": 0.6682,
+      "w": 0.2756,
+      "h": 0.0662,
+      "lang": "mixed"
+    },
+    "Restrictions": {
+      "x": 0.4637,
+      "y": 0.7287,
+      "w": 0.4024,
+      "h": 0.0662,
+      "lang": "mixed"
+    }
+  },
+  "anchors": {
+    "royaume_du_maroc_fr": {
+      "name": "royaume_du_maroc",
+      "x": 0.3232,
+      "y": 0.4924,
+      "w": 0.2101,
+      "h": 0.0577
+    },
+    "marque_fr": {
+      "name": "marque",
+      "x": 0.3226,
+      "y": 0.0284,
+      "w": 0.0946,
+      "h": 0.0482
+    },
+    "type_fr": {
+      "name": "type",
+      "x": 0.3214,
+      "y": 0.087,
+      "w": 0.0595,
+      "h": 0.0473
+    },
+    "number_chassis_fr": {
+      "name": "number_chassis",
+      "x": 0.3244,
+      "y": 0.3223,
+      "w": 0.1488,
+      "h": 0.0397
+    }
+  }
+}

@@ -409,7 +409,7 @@ class CarteGriseZoneGenerator:
                 x2 = int(self.w * 0.80)
 
         # patch manuel final
-        x1, y1, x2, y2 = self.apply_manual_zone_fixes(field, x1, y1, x2, y2)
+        x1, y1, x2, y2 = self.apply_manual_zone_fixes(field, x1, y1, x2, y2 + 10)
 
         zones[field] = {
             "x1": int(x1),
@@ -458,11 +458,11 @@ class CarteGriseZoneGenerator:
             x2 = int(self.w * 0.86)
 
         if fr_box and ar_box:
-            y1 = min(fr_box["y2"], ar_box["y2"]) - 2
+            y1 = min(fr_box["y2"], ar_box["y2"]) - 20
         elif fr_box:
-            y1 = fr_box["y2"] - 2
+            y1 = fr_box["y2"] - 20
         else:
-            y1 = ar_box["y2"] - 2
+            y1 = ar_box["y2"] - 20
 
         expiry_top_candidates = []
         if expiry_fr_box:
@@ -480,6 +480,7 @@ class CarteGriseZoneGenerator:
             else:
                 y2 = int(self.h * 0.78)
 
+        y2 -= 20
         self.add_zone(zones, "address", x1, y1, x2, y2, "mixed")
 
     def compute_value_zones(self, anchors: dict):

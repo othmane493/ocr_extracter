@@ -44,8 +44,16 @@ class CINExtractor(ABC):
                 CINExtractor._reader_ar, CINExtractor._reader_fr = get_paddle_reader()
             except (ImportError, Exception):
                 # Fallback si le singleton n'est pas disponible
-                CINExtractor._reader_ar = PaddleOCR(lang="ar", use_angle_cls=False)
-                CINExtractor._reader_fr = PaddleOCR(lang="fr", use_angle_cls=False)
+                CINExtractor._reader_ar = PaddleOCR(
+                    lang="ar",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
+                CINExtractor._reader_fr = PaddleOCR(
+                    lang="fr",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
 
         self.reader_ar = CINExtractor._reader_ar
         self.reader_fr = CINExtractor._reader_fr

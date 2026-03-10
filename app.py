@@ -5,7 +5,6 @@ Supporte: CIN Old, CIN New, Carte Grise Recto, Carte Grise Verso
 import os
 import sys
 import time
-import json
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from pathlib import Path

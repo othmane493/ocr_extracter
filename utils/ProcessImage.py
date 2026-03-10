@@ -2,6 +2,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import pytesseract
+import time
 
 
 class ProcessImage:
@@ -77,7 +78,7 @@ class ProcessImage:
         _, thresh = cv2.threshold(gray, 148, 253, cv2.THRESH_BINARY_INV)
         # agrandir pour Tesseract
         thresh = self.resize(scale, thresh)
-
+        #cv2.imwrite(f"debug_{time.time()}.jpg", thresh)
         return thresh, self.image
 
     def mode_paddle(self) -> np.ndarray:
@@ -100,7 +101,7 @@ class ProcessImage:
     def process(self, mode: str):
         modes = {
             "mode_cg_pytesseract": self.mode_tesseract,
-            "mode_cg_ocr": lambda: self.mode_ocr(black_threshold=145, scale=1.0),
+            "mode_cg_ocr": lambda: self.mode_ocr(black_threshold=148, scale=1.0),
             "mode_cg_paddle": self.mode_paddle,
             "detect_double_dash": self.detect_double_dash,
         }

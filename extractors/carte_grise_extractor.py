@@ -4,6 +4,9 @@ Extracteur de cartes grises marocaines (Recto / Verso)
 - OCR par zones via template JSON
 - PaddleOCR uniquement pour les champs configures avec ocr="fr" ou ocr="ar"
 - Tesseract uniquement pour les champs configures avec ocr="tesseract"
+- Retry PaddleOCR ciblé pour les champs Tesseract douteux
+- Validation métier des dates
+- Validation métier de l'immatriculation
 - Detection double dash pour certains champs verso
 - Batch OCR FR / AR
 - Réduction des marges blanches autour du texte avant OCR
@@ -15,6 +18,7 @@ import re
 import json
 import unicodedata
 import time
+from datetime import datetime
 from contextlib import contextmanager
 from typing import Dict, Any, List, Optional
 
@@ -44,13 +48,14 @@ class CarteGriseExtractor:
     Fusion des deux versions :
     - Pipeline PaddleOCR = version 1
     - Pipeline Tesseract + detect_double_dash = version 2
+    - Retry Paddle ciblé pour les champs Tesseract douteux
     """
 
     FIELDS_KEY_RECTO = {
         "registration_number_matriculate": {
             "fr": "Numéro d'immatriculation",
             "ar": "رقم التسجيل",
-            "normalise": "0-9أبدهوهـط-",
+            "normalise": "0-9\u0621-\u064A-",
             "multi_line": False,
             "extract_ar": True,
             "type": "center_value",
@@ -155,7 +160,7 @@ class CarteGriseExtractor:
             "multi_line": False,
             "type": "center_value",
             "ocr": "fr",
-            "detect_double_dash": True
+            "detect_double_dash": False
         },
         "Type_Carburant": {
             "fr": "Type carburant",
@@ -255,31 +260,46 @@ class CarteGriseExtractor:
         self.config = None
         self._current_timings = None
 
-        if not hasattr(CarteGriseExtractor, "_reader_fr"):
-            CarteGriseExtractor._reader_fr = None
-        if not hasattr(CarteGriseExtractor, "_reader_ar"):
-            CarteGriseExtractor._reader_ar = None
+        if (
+                not hasattr(CarteGriseExtractor, "_reader_ar")
+                or not hasattr(CarteGriseExtractor, "_reader_fr")
+                or CarteGriseExtractor._reader_ar is None
+                or CarteGriseExtractor._reader_fr is None
+        ):
+            try:
+                import sys
+                import os
+
+                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if parent_dir not in sys.path:
+                    sys.path.insert(0, parent_dir)
+
+                from ocr_manager import get_paddle_reader
+                CarteGriseExtractor._reader_ar, CarteGriseExtractor._reader_fr = get_paddle_reader()
+                print("[INFO] Paddle readers récupérés depuis ocr_manager.")
+            except (ImportError, Exception) as e:
+                print(f"[WARN] Impossible d'utiliser ocr_manager, fallback local PaddleOCR: {e}")
+
+                t0 = time.perf_counter()
+                CarteGriseExtractor._reader_fr = PaddleOCR(
+                    lang="fr",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
+                print(f"[PERF] init Paddle FR fallback: {time.perf_counter() - t0:.4f}s")
+
+                t0 = time.perf_counter()
+                CarteGriseExtractor._reader_ar = PaddleOCR(
+                    lang="ar",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
+                print(f"[PERF] init Paddle AR fallback: {time.perf_counter() - t0:.4f}s")
+
+        self.reader_ar = CarteGriseExtractor._reader_ar
+        self.reader_fr = CarteGriseExtractor._reader_fr
 
         init_start = time.perf_counter()
-
-        if CarteGriseExtractor._reader_fr is None:
-            t0 = time.perf_counter()
-            CarteGriseExtractor._reader_fr = PaddleOCR(
-                lang="fr",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False
-            )
-            print(f"[PERF] init Paddle FR: {time.perf_counter() - t0:.4f}s")
-
-        if CarteGriseExtractor._reader_ar is None:
-            t0 = time.perf_counter()
-            CarteGriseExtractor._reader_ar = PaddleOCR(
-                lang="ar",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False
-            )
-            print(f"[PERF] init Paddle AR: {time.perf_counter() - t0:.4f}s")
-
         t0 = time.perf_counter()
         with open(recto_template_json, "r", encoding="utf-8") as f:
             self.recto_template = json.load(f)
@@ -403,6 +423,19 @@ class CarteGriseExtractor:
         if w > 640:
             img = self._resize_zone_fast(img, max_width=350)
 
+        if lang == "fr":
+            img = ProcessImage(image=img).process("mode_cg_ocr")
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        #elif lang == "ar":
+        #    # pour la matricule on ne passe pas par mode_cg_ocr,
+        #    # mais on peut renforcer légèrement le contraste
+        #    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        #    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        #    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        #    img = cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
+        #    cv2.imwrite(f"debug_{time.time()}.jpg", img)
+
         self._add_timing(f"prepare_zone_{lang}", time.perf_counter() - t0)
         return img
 
@@ -451,7 +484,7 @@ class CarteGriseExtractor:
 
     @staticmethod
     def has_required_matricule_arabic_letter(text: str) -> bool:
-        return bool(re.search(r'[أبدهوهـط]', text or ""))
+        return bool(re.search(r'[\u0621-\u064A]', text or ""))
 
     @staticmethod
     def clean_invisible_chars(text):
@@ -494,6 +527,62 @@ class CarteGriseExtractor:
     def _crop_from_box(image, box: Dict[str, int]):
         x, y, w, h = box["x"], box["y"], box["width"], box["height"]
         return image[y:y + h, x:x + w]
+
+    @staticmethod
+    def _parse_date_ddmmyyyy(value: str):
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value.strip(), "%d/%m/%Y")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_likely_date_field(field_name: str) -> bool:
+        return field_name.endswith("_date")
+
+    @staticmethod
+    def _is_matricule_field(field_name: str) -> bool:
+        return field_name == "registration_number_matriculate"
+
+    def _is_valid_date_value(
+        self,
+        field_name: str,
+        value: str,
+        context_dates: Optional[Dict[str, str]] = None
+    ) -> bool:
+        dt = self._parse_date_ddmmyyyy(value)
+        if dt is None:
+            return False
+
+        current_year = datetime.now().year
+
+        if field_name == "expiry_date":
+            return dt.year <= current_year + 10
+
+        if context_dates:
+            expiry_value = context_dates.get("expiry_date")
+            expiry_dt = self._parse_date_ddmmyyyy(expiry_value) if expiry_value else None
+            if expiry_dt and dt > expiry_dt:
+                return False
+
+        return True
+
+    def _is_valid_matricule_value(self, value: str) -> bool:
+        if not value:
+            return False
+
+        cleaned = re.sub(r"\s+", "", value)
+
+        if not self.has_required_matricule_arabic_letter(cleaned):
+            return False
+
+        patterns = [
+            r'^\d{1,6}-\d{1,3}-[\u0621-\u064A]$',
+            r'^\d{1,6}-[\u0621-\u064A]-\d{1,3}$',
+            r'^\d{1,7}-[\u0621-\u064A]$',
+        ]
+        return any(re.match(p, cleaned) for p in patterns)
 
     def _normalize_final_value(self, field_name: str, value: str, allowed_chars: str) -> str:
         t0 = time.perf_counter()
@@ -541,11 +630,11 @@ class CarteGriseExtractor:
             self._add_timing("choose_best_matricule", time.perf_counter() - t0)
             return {"text": "", "confidence": 0, "engine": "none"}
 
-        with_ar = [c for c in cleaned_candidates if self.has_required_matricule_arabic_letter(c["text"])]
-        if with_ar:
-            with_ar.sort(key=lambda c: (c["confidence"], len(c["text"])), reverse=True)
+        valid = [c for c in cleaned_candidates if self._is_valid_matricule_value(c["text"])]
+        if valid:
+            valid.sort(key=lambda c: (c["confidence"], len(c["text"])), reverse=True)
             self._add_timing("choose_best_matricule", time.perf_counter() - t0)
-            return with_ar[0]
+            return valid[0]
 
         cleaned_candidates.sort(key=lambda c: (c["confidence"], len(c["text"])), reverse=True)
         self._add_timing("choose_best_matricule", time.perf_counter() - t0)
@@ -631,53 +720,152 @@ class CarteGriseExtractor:
         processed, _ = ProcessImage(image=zone_img).process("mode_cg_pytesseract")
         self._add_timing("tesseract_preprocess", time.perf_counter() - t1)
 
-        whitelist = ""
+        def run_tesseract(img, config):
+            data = pytesseract.image_to_data(
+                img,
+                config=config,
+                output_type=Output.DICT
+            )
 
+            words = []
+            confs = []
+
+            for txt, conf in zip(data["text"], data["conf"]):
+                txt = self.clean_invisible_chars(txt)
+                if not txt:
+                    continue
+
+                try:
+                    conf = float(conf)
+                except Exception:
+                    conf = -1
+
+                if conf < 0:
+                    continue
+
+                words.append(txt)
+                confs.append(conf)
+
+            text = self._safe_text_join(words)
+            avg_conf = int(sum(confs) / len(confs)) if confs else 0
+            return {
+                "text": text,
+                "confidence": avg_conf,
+                "engine": "tesseract"
+            }
+
+        # Cas dates : plusieurs essais
         if field_name.endswith("_date"):
+            candidates = []
+
             whitelist = r" -c tessedit_char_whitelist=0123456789/"
+            configs = [
+                rf'--oem 3 --psm 7{whitelist}',
+                rf'--oem 3 --psm 6{whitelist}',
+                rf'--oem 3 --psm 13{whitelist}',
+            ]
+
+            t1 = time.perf_counter()
+            for cfg in configs:
+                candidates.append(run_tesseract(processed, cfg))
+            self._add_timing("tesseract_image_to_data", time.perf_counter() - t1)
+
+            best = None
+            for c in candidates:
+                normalized = self._normalize_final_value(field_name, c["text"], "0-9/")
+                valid = self._parse_date_ddmmyyyy(normalized) is not None
+                score = (1 if valid else 0, c["confidence"], len(c["text"] or ""))
+                if best is None or score > best[0]:
+                    best = (score, c)
+
+            self._add_timing("tesseract_total", time.perf_counter() - t0)
+            return best[1]
+
+        # Cas immatriculation/chassis
         elif "registration" in field_name or "chassis" in field_name:
-            whitelist = r" -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            whitelist = r" -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+            custom_config = rf'--oem 3 --psm 7{whitelist}'
 
-        custom_config = rf'--oem 3 --psm 7{whitelist}'
+        # Cas général
+        else:
+            custom_config = r'--oem 3 --psm 7'
 
         t1 = time.perf_counter()
-        data = pytesseract.image_to_data(
-            processed,
-            config=custom_config,
-            output_type=Output.DICT
-        )
+        res = run_tesseract(processed, custom_config)
         self._add_timing("tesseract_image_to_data", time.perf_counter() - t1)
-
-        t1 = time.perf_counter()
-        words = []
-        confs = []
-
-        for txt, conf in zip(data["text"], data["conf"]):
-            txt = self.clean_invisible_chars(txt)
-            if not txt:
-                continue
-
-            try:
-                conf = float(conf)
-            except Exception:
-                conf = -1
-
-            if conf < 0:
-                continue
-
-            words.append(txt)
-            confs.append(conf)
-
-        text = self._safe_text_join(words)
-        avg_conf = int(sum(confs) / len(confs)) if confs else 0
-        self._add_timing("tesseract_postprocess", time.perf_counter() - t1)
         self._add_timing("tesseract_total", time.perf_counter() - t0)
+        return res
+    def _should_retry_tesseract_with_paddle(
+        self,
+        field_name: str,
+        normalized_value: str,
+        confidence: int,
+        context_dates: Optional[Dict[str, str]] = None
+    ) -> bool:
+        if not normalized_value:
+            return True
+
+        if self._is_likely_date_field(field_name):
+            return not (self._is_valid_date_value(field_name, normalized_value, context_dates=context_dates) and confidence > 80)
+
+        if self._is_matricule_field(field_name):
+            return not (self._is_valid_matricule_value(normalized_value) and confidence > 80)
+
+        if confidence < 70:
+            return True
+
+        return False
+
+    def _retry_with_paddle_for_tesseract_field(self, zone, field_name: str, pattern: str) -> Dict[str, Any]:
+        lang = "ar" if self._is_matricule_field(field_name) else "fr"
+
+        paddle_results = self._ocr_paddle_batch([zone], lang=lang)
+        if not paddle_results:
+            return {"text": "", "confidence": 0, "engine": "paddle_retry"}
+
+        res = paddle_results[0]
+        value = self._normalize_final_value(field_name, res["text"], pattern)
 
         return {
-            "text": text,
-            "confidence": avg_conf,
-            "engine": "tesseract"
+            "text": value,
+            "confidence": int(res["confidence"]),
+            "engine": "paddle_retry"
         }
+
+    def _choose_best_tesseract_or_retry(
+        self,
+        field_name: str,
+        tess_value: str,
+        tess_conf: int,
+        retry_value: str,
+        retry_conf: int,
+        context_dates: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        if self._is_likely_date_field(field_name):
+            tess_valid = self._is_valid_date_value(field_name, tess_value, context_dates=context_dates)
+            retry_valid = self._is_valid_date_value(field_name, retry_value, context_dates=context_dates)
+        elif self._is_matricule_field(field_name):
+            tess_valid = self._is_valid_matricule_value(tess_value)
+            retry_valid = self._is_valid_matricule_value(retry_value)
+        else:
+            tess_valid = bool(tess_value)
+            retry_valid = bool(retry_value)
+
+        if retry_valid and not tess_valid:
+            return {"value": retry_value, "confidence": retry_conf, "engine": "paddle_retry"}
+
+        if tess_valid and not retry_valid:
+            return {"value": tess_value, "confidence": tess_conf, "engine": "tesseract"}
+
+        if retry_valid and tess_valid:
+            if retry_conf >= tess_conf:
+                return {"value": retry_value, "confidence": retry_conf, "engine": "paddle_retry"}
+            return {"value": tess_value, "confidence": tess_conf, "engine": "tesseract"}
+
+        if retry_conf >= tess_conf:
+            return {"value": retry_value, "confidence": retry_conf, "engine": "paddle_retry"}
+
+        return {"value": tess_value, "confidence": tess_conf, "engine": "tesseract"}
 
     def _is_double_dash_zone(self, zone_img) -> bool:
         t0 = time.perf_counter()
@@ -789,6 +977,7 @@ class CarteGriseExtractor:
 
                 fr_jobs = []
                 ar_jobs = []
+                tesseract_retry_candidates = {}
 
                 def make_empty_item(field_conf):
                     return {
@@ -944,18 +1133,56 @@ class CarteGriseExtractor:
                         tess_res = self._ocr_tesseract_zone(zone, field_name=field_name)
                         self._add_timing("tesseract_loop_total", time.perf_counter() - t0)
 
-                        value = self._normalize_final_value(field_name, tess_res["text"], pattern)
+                        tess_value = self._normalize_final_value(field_name, tess_res["text"], pattern)
+                        tess_conf = int(tess_res["confidence"])
+
+                        context_dates = {
+                            "expiry_date": result_map.get("expiry_date", {}).get("fr", {}).get("value", "")
+                        }
+
+                        need_retry = self._should_retry_tesseract_with_paddle(
+                            field_name=field_name,
+                            normalized_value=tess_value,
+                            confidence=tess_conf,
+                            context_dates=context_dates
+                        )
+
+                        final_value = tess_value
+                        final_conf = tess_conf
+
+                        if need_retry:
+                            t1 = time.perf_counter()
+                            retry_res = self._retry_with_paddle_for_tesseract_field(zone, field_name, pattern)
+                            self._add_timing("tesseract_retry_paddle_total", time.perf_counter() - t1)
+
+                            best = self._choose_best_tesseract_or_retry(
+                                field_name=field_name,
+                                tess_value=tess_value,
+                                tess_conf=tess_conf,
+                                retry_value=retry_res["text"],
+                                retry_conf=int(retry_res["confidence"]),
+                                context_dates=context_dates
+                            )
+                            final_value = best["value"]
+                            final_conf = int(best["confidence"])
 
                         result_map[field_name]["fr"].update({
-                            "value": value,
-                            "confidence": int(tess_res["confidence"]),
+                            "value": final_value,
+                            "confidence": final_conf,
                             **box
                         })
                         result_map[field_name]["ar"].update({
-                            "value": value,
-                            "confidence": int(tess_res["confidence"]),
+                            "value": final_value,
+                            "confidence": final_conf,
                             **box
                         })
+
+                        if self._is_likely_date_field(field_name):
+                            tesseract_retry_candidates[field_name] = {
+                                "zone": zone,
+                                "pattern": pattern,
+                                "box": box
+                            }
                         continue
 
                     if field_name == "registration_number_matriculate":
@@ -1047,6 +1274,47 @@ class CarteGriseExtractor:
                             "confidence": conf,
                             **job["box"]
                         })
+
+            # 2e passage métier pour dates :
+            # maintenant expiry_date est connue, on peut revalider les autres dates.
+            with self._timer("post_validate_dates_total"):
+                expiry_value = result_map.get("expiry_date", {}).get("fr", {}).get("value", "")
+                context_dates = {"expiry_date": expiry_value}
+
+                for field_name, candidate in tesseract_retry_candidates.items():
+                    current_value = result_map[field_name]["fr"]["value"]
+                    current_conf = int(result_map[field_name]["fr"]["confidence"])
+
+                    if self._is_valid_date_value(field_name, current_value, context_dates=context_dates):
+                        continue
+
+                    zone = candidate["zone"]
+                    pattern = candidate["pattern"]
+                    box = candidate["box"]
+
+                    t1 = time.perf_counter()
+                    retry_res = self._retry_with_paddle_for_tesseract_field(zone, field_name, pattern)
+                    self._add_timing("post_validate_dates_retry_paddle_total", time.perf_counter() - t1)
+
+                    best = self._choose_best_tesseract_or_retry(
+                        field_name=field_name,
+                        tess_value=current_value,
+                        tess_conf=current_conf,
+                        retry_value=retry_res["text"],
+                        retry_conf=int(retry_res["confidence"]),
+                        context_dates=context_dates
+                    )
+
+                    result_map[field_name]["fr"].update({
+                        "value": best["value"],
+                        "confidence": int(best["confidence"]),
+                        **box
+                    })
+                    result_map[field_name]["ar"].update({
+                        "value": best["value"],
+                        "confidence": int(best["confidence"]),
+                        **box
+                    })
 
             with self._timer("final_transform"):
                 ordered_data = [result_map[field_name] for field_name in fields_key.keys()]

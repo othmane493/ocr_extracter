@@ -25,8 +25,16 @@ class OCRManager:
             start = time.time()
             
             # Initialiser EasyOCR
-            OCRManager._reader_ar = PaddleOCR(lang="ar", use_angle_cls=False)
-            OCRManager._reader_fr = PaddleOCR(lang="fr", use_angle_cls=False)
+            OCRManager._reader_ar = PaddleOCR(
+                    lang="ar",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
+            OCRManager._reader_fr = PaddleOCR(
+                    lang="fr",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
             elapsed = time.time() - start
             print(f"Modèles OCR chargés en {elapsed:.2f}s")
             OCRManager._initialized = True

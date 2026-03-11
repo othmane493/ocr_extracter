@@ -91,6 +91,13 @@ class CINOldTemplateGenerator:
     def _clamp(v: int, min_v: int, max_v: int) -> int:
         return max(min_v, min(v, max_v))
 
+    def load_size_from_image(self, image_path: str) -> None:
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Impossible de lire l'image: {image_path}")
+
+        self.height, self.width = img.shape[:2]
+
     def draw_debug(self, image_path: str, output_debug_path: str) -> None:
         img = cv2.imread(image_path)
         if img is None:
@@ -129,10 +136,14 @@ class CINOldTemplateGenerator:
 
 
 if __name__ == "__main__":
-    generator = CINOldTemplateGenerator(width=996, height=623)
+    image_path = "../images/cin_recto_1.jpeg"
+
+    generator = CINOldTemplateGenerator()
+    generator.load_size_from_image(image_path)
+
     generator.save_json("cin_old_template.json")
     generator.draw_debug(
-        image_path="../images/cin_recto_1.jpeg",
+        image_path=image_path,
         output_debug_path="cin_old_template_debug.png"
     )
 

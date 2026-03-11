@@ -233,9 +233,6 @@ class CINORBAligner:
         min_matches: int = 30,
         debug: bool = False
     ) -> Dict:
-        raw_input = cv2.imread(input_image_path)
-        if raw_input is None:
-            raise ValueError(f"Impossible de lire l'image input: {input_image_path}")
 
         # Etape 1 : redressement de la carte
         rectified = self.detect_and_rectify_card(
@@ -333,6 +330,17 @@ class CINORBAligner:
         )
 
         self._safe_write(out_aligned_path, aligned)
+        refined_boxes = {}
+
+        if self.template is not None:
+            fields = self.template.get("fields", {})
+            names = field_names_for_debug if field_names_for_debug is not None else list(fields.keys())
+
+            for field_name in names:
+                field = fields.get(field_name)
+                if not field:
+                    continue
+                refined_boxes[field_name] = self._field_to_pixels(field)
 
         debug_matches = None
         debug_polygon = None
@@ -401,6 +409,7 @@ class CINORBAligner:
 
         result = {
             "aligned_image": aligned,
+            "refined_boxes": refined_boxes,
             "meta": {
                 "reference_width": self.ref_w,
                 "reference_height": self.ref_h,
@@ -427,23 +436,6 @@ class CINORBAligner:
             result["template"] = None
 
         return result
-
-    def order_points(self, pts: np.ndarray) -> np.ndarray:
-        """
-        Ordonne 4 points dans l'ordre :
-        top-left, top-right, bottom-right, bottom-left
-        """
-        rect = np.zeros((4, 2), dtype=np.float32)
-
-        s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]  # top-left
-        rect[2] = pts[np.argmax(s)]  # bottom-right
-
-        diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]  # top-right
-        rect[3] = pts[np.argmax(diff)]  # bottom-left
-
-        return rect
 
     def order_points(self, pts: np.ndarray) -> np.ndarray:
         """
@@ -569,9 +561,10 @@ class CINORBAligner:
     # Field extraction from aligned image
     # =========================================================
     def _extract_field_crops(
-        self,
-        aligned_image,
-        field_names: Optional[List[str]] = None
+            self,
+            aligned_image,
+            field_names: Optional[List[str]] = None,
+            refined_boxes: Optional[Dict[str, tuple]] = None
     ) -> Dict[str, np.ndarray]:
         if self.template is None:
             raise ValueError("Aucun template JSON fourni.")
@@ -582,13 +575,15 @@ class CINORBAligner:
 
         crops = {}
         for field_name in field_names:
-            field = fields.get(field_name)
-            if not field:
-                continue
+            if refined_boxes and field_name in refined_boxes:
+                x1, y1, x2, y2 = refined_boxes[field_name]
+            else:
+                field = fields.get(field_name)
+                if not field:
+                    continue
+                x1, y1, x2, y2 = self._field_to_pixels(field)
 
-            x1, y1, x2, y2 = self._field_to_pixels(field)
             crop = aligned_image[y1:y2, x1:x2]
-
             if crop is not None and crop.size > 0:
                 crops[field_name] = crop
 
@@ -605,23 +600,24 @@ class CINORBAligner:
     # Public main method
     # =========================================================
     def process_card(
-        self,
-        input_image_path: str,
-        field_names: Optional[List[str]] = None,
-        save_aligned_path: Optional[str] = None,
-        save_debug_matches_path: Optional[str] = None,
-        save_debug_polygon_path: Optional[str] = None,
-        save_debug_fields_path: Optional[str] = None,
-        ransac_thresh: float = 5.0,
-        min_matches: int = 30,
-        debug: bool = False
+            self,
+            input_image_path: str,
+            field_names: Optional[List[str]] = None,
+            save_aligned_path: Optional[str] = None,
+            ransac_thresh: float = 5.0,
+            min_matches: int = 30,
+            debug: bool = False,
+            save_debug_matches_path: Optional[str] = None,
+            save_debug_polygon_path: Optional[str] = None,
+            save_debug_fields_path: Optional[str] = None,
+            save_refined_fields_path: Optional[str] = None
     ) -> Dict:
         result = self._align_image_internal(
             input_image_path=input_image_path,
             out_aligned_path=save_aligned_path,
-            out_debug_matches_path=save_debug_matches_path,
-            out_debug_polygon_path=save_debug_polygon_path,
-            out_debug_fields_path=save_debug_fields_path,
+            out_debug_matches_path=save_debug_matches_path if debug else None,
+            out_debug_polygon_path=save_debug_polygon_path if debug else None,
+            out_debug_fields_path=save_debug_fields_path if debug else None,
             field_names_for_debug=field_names,
             ransac_thresh=ransac_thresh,
             min_matches=min_matches,
@@ -629,21 +625,68 @@ class CINORBAligner:
         )
 
         aligned_image = result["aligned_image"]
+        refined_boxes = result.get("refined_boxes", {}) or {}
 
         field_crops = {}
         if self.template is not None:
-            field_crops = self._extract_field_crops(aligned_image, field_names=field_names)
+            field_crops = self._extract_field_crops(
+                aligned_image,
+                field_names=field_names,
+                refined_boxes=refined_boxes
+            )
+
+        # debug séparé pour les refined boxes
+        if debug and save_refined_fields_path and refined_boxes:
+            dbg = aligned_image.copy()
+            for field_name, (x1, y1, x2, y2) in refined_boxes.items():
+                cv2.rectangle(dbg, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(
+                    dbg,
+                    field_name,
+                    (x1, max(15, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (255, 0, 0),
+                    1,
+                    cv2.LINE_AA
+                )
+            self._safe_write(save_refined_fields_path, dbg)
 
         return {
             "aligned_image": aligned_image,
-            "template": result["template"],
-            "meta": result["meta"],
+            "refined_boxes": refined_boxes,
+            "template": result.get("template"),
+            "meta": result.get("meta", {}),
             "field_crops": field_crops,
-            "debug_matches_image": result["debug_matches_image"],
-            "debug_polygon_image": result["debug_polygon_image"],
-            "debug_fields_image": result["debug_fields_image"]
+            "debug_matches_image": result.get("debug_matches_image"),
+            "debug_polygon_image": result.get("debug_polygon_image"),
+            "debug_fields_image": result.get("debug_fields_image")
         }
 
+    def process_card_debug(
+            self,
+            input_image_path: str,
+            field_names: Optional[List[str]] = None,
+            save_aligned_path: str = "debug/aligned.jpg",
+            save_debug_matches_path: str = "debug/orb_matches.jpg",
+            save_debug_polygon_path: str = "debug/orb_polygon.jpg",
+            save_debug_fields_path: str = "debug/fields_debug.jpg",
+            save_refined_fields_path: str = "debug/refined_fields_debug.jpg",
+            ransac_thresh: float = 5.0,
+            min_matches: int = 30
+    ) -> Dict:
+        return self.process_card(
+            input_image_path=input_image_path,
+            field_names=field_names,
+            save_aligned_path=save_aligned_path,
+            ransac_thresh=ransac_thresh,
+            min_matches=min_matches,
+            debug=True,
+            save_debug_matches_path=save_debug_matches_path,
+            save_debug_polygon_path=save_debug_polygon_path,
+            save_debug_fields_path=save_debug_fields_path,
+            save_refined_fields_path=save_refined_fields_path
+        )
 
 if __name__ == "__main__":
     # =========================================================
@@ -666,16 +709,15 @@ if __name__ == "__main__":
         "date_expiration"
     ]
 
-    cin_old_result = cin_old_aligner.process_card(
-        input_image_path="../images/old-cin-recto.jpg",
+    cin_old_result = cin_old_aligner.process_card_debug(
+        input_image_path="../images/cin_recto_3.jpeg",
         field_names=cin_old_fields,
         save_aligned_path="debug/cin_old_aligned.jpg",
         save_debug_matches_path="debug/cin_old_orb_matches.jpg",
         save_debug_polygon_path="debug/cin_old_orb_polygon.jpg",
         save_debug_fields_path="debug/cin_old_fields_debug.jpg",
         ransac_thresh=5.0,
-        min_matches=30,
-        debug=True
+        min_matches=30
     )
 
     print("=== CIN OLD ORB ===")
@@ -707,7 +749,7 @@ if __name__ == "__main__":
         "cin"
     ]
 
-    cin_new_result = cin_new_aligner.process_card(
+    cin_new_result = cin_new_aligner.process_card_debug(
         input_image_path="../images/cin_new1.jpg",
         field_names=cin_new_fields,
         save_aligned_path="debug/cin_new_aligned.jpg",
@@ -715,8 +757,7 @@ if __name__ == "__main__":
         save_debug_polygon_path="debug/cin_new_orb_polygon.jpg",
         save_debug_fields_path="debug/cin_new_fields_debug.jpg",
         ransac_thresh=5.0,
-        min_matches=30,
-        debug=True
+        min_matches=30
     )
 
     print("=== CIN NEW ORB ===")

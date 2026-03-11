@@ -1,6 +1,5 @@
 """
 Extracteur unifié pour les CIN (Old et New)
-Utilise la fonction extract_cin
 """
 
 import os
@@ -11,6 +10,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from cin_detector import extract_cin
+from config.CinRecenter import CINORBAligner
 
 
 class CINExtractor:
@@ -18,15 +18,32 @@ class CINExtractor:
         pass
 
     def extract(self, image_path, cin_type):
+
         if cin_type == "cin_old":
             detected_type = "OLD"
+            template_path = "config/cin_old_template.json"
+            reference_path = "images/cin_recto_1.jpeg"
+
         elif cin_type == "cin_new":
             detected_type = "NEW"
+            template_path = "config/cin_new_template.json"
+            reference_path = "images/cin_new.png"
+
         else:
             raise ValueError(f"Type de CIN invalide: {cin_type}")
+
+        recenter_handler = None
+
+        if os.path.exists(reference_path):
+            recenter_handler = CINORBAligner(
+                reference_image_path=reference_path,
+                template_json_path=template_path
+            )
 
         return extract_cin(
             image_path=image_path,
             cin_type=detected_type,
-            debug=True
+            template_path=template_path,
+            debug=True,
+            recenter_handler=recenter_handler
         )

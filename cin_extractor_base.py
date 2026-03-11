@@ -1,78 +1,93 @@
-"""
-Classe de base pour l'extraction de données des CIN marocaines
-Contient toutes les méthodes communes aux deux types de CIN
-"""
 import json
+import os
+import re
+import tempfile
+from abc import ABC, abstractmethod
+from typing import Dict, Tuple, List, Any, Optional
+
 import cv2
 import numpy as np
 from paddleocr import PaddleOCR
-import re
-from abc import ABC, abstractmethod
-from typing import Dict, Tuple, List, Any
-from utils.ProcessImage import ProcessImage
+
 from json_transformer import is_arabic
 
 
 class CINExtractor(ABC):
-    """Classe de base abstraite pour l'extraction de CIN"""
-
-    def __init__(self, template_path: str, image_path: str, debug: bool = True):
-        """
-        Initialise l'extracteur de CIN
-
-        Args:
-            template_path: Chemin vers le fichier template JSON
-            image_path: Chemin vers l'image à traiter
-            debug: Si True, génère une image de debug avec les zones
-        """
+    def __init__(
+        self,
+        template_path: str,
+        image_path: str,
+        debug: bool = True,
+        recenter_handler=None
+    ):
         self.template_path = template_path
         self.image_path = image_path
         self.debug = debug
         self.debug_image_path = "debug_zones.png"
+        self.recenter_handler = recenter_handler
 
-        # Utiliser le reader EasyOCR partagé du singleton
-        if not hasattr(CINExtractor, '_reader_ar') or not hasattr(CINExtractor, '_reader_fr') or CINExtractor._reader_ar is None or CINExtractor._reader_fr is None:
-            try:
-                # Essayer d'utiliser le singleton
-                import sys
-                import os
-                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                if parent_dir not in sys.path:
-                    sys.path.insert(0, parent_dir)
+        self.template = None
+        self.img = None
+        self._temp_aligned_path = None
 
-                from ocr_manager import get_paddle_reader
-                CINExtractor._reader_ar, CINExtractor._reader_fr = get_paddle_reader()
-            except (ImportError, Exception):
-                # Fallback si le singleton n'est pas disponible
-                CINExtractor._reader_ar = PaddleOCR(
-                    lang="ar",
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False
-                )
-                CINExtractor._reader_fr = PaddleOCR(
-                    lang="fr",
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False
-                )
+        if not hasattr(CINExtractor, "_reader_ar") or CINExtractor._reader_ar is None:
+            CINExtractor._reader_ar = PaddleOCR(
+                lang="ar",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False
+            )
+
+        if not hasattr(CINExtractor, "_reader_fr") or CINExtractor._reader_fr is None:
+            CINExtractor._reader_fr = PaddleOCR(
+                lang="fr",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False
+            )
 
         self.reader_ar = CINExtractor._reader_ar
         self.reader_fr = CINExtractor._reader_fr
-        self.template = None
-        self.img = None
 
     def load_template(self) -> Dict:
-        """Charge le fichier template JSON"""
         with open(self.template_path, encoding="utf-8") as f:
             self.template = json.load(f)
         return self.template
 
-    def load_image(self) -> np.ndarray:
-        """Charge et redimensionne l'image selon le template"""
-        self.img = cv2.imread(self.image_path)
-        if self.img is None:
-            raise ValueError(f"Image non trouvée: {self.image_path}")
+    def maybe_recenter_image(self) -> str:
+        """
+        Si un handler de recentrage est fourni, on génère une image alignée
+        temporaire puis on travaille dessus.
+        """
+        if self.recenter_handler is None:
+            return self.image_path
 
-        # Redimensionner si nécessaire
+        os.makedirs("debug", exist_ok=True)
+
+        fd, temp_path = tempfile.mkstemp(prefix="cin_aligned_", suffix=".jpg")
+        os.close(fd)
+        self._temp_aligned_path = temp_path
+
+        try:
+            self.recenter_handler.process_card(
+                input_image_path=self.image_path,
+                save_aligned_path=temp_path,
+                save_debug_matches_path="debug/cin_orb_matches.jpg" if self.debug else None,
+                save_debug_polygon_path="debug/cin_orb_polygon.jpg" if self.debug else None,
+                save_debug_fields_path="debug/cin_orb_fields.jpg" if self.debug else None,
+                debug=self.debug
+            )
+            return temp_path
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Recentrage ignoré, fallback image brute: {e}")
+            return self.image_path
+
+    def load_image(self) -> np.ndarray:
+        image_to_read = self.maybe_recenter_image()
+
+        self.img = cv2.imread(image_to_read)
+        if self.img is None:
+            raise ValueError(f"Image non trouvée: {image_to_read}")
+
         if self.template and "width" in self.template and "height" in self.template:
             target_size = (self.template["width"], self.template["height"])
             if (self.img.shape[1], self.img.shape[0]) != target_size:
@@ -82,16 +97,6 @@ class CINExtractor(ABC):
 
     @staticmethod
     def safe_crop(img: np.ndarray, rule: Dict) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
-        """
-        Découpe une zone de l'image de manière sécurisée
-
-        Args:
-            img: Image source
-            rule: Dictionnaire avec x, y, w, h (coordonnées normalisées)
-
-        Returns:
-            Tuple (zone_découpée, (x, y, width, height))
-        """
         h, w = img.shape[:2]
 
         x = int(rule["x"] * w)
@@ -99,7 +104,6 @@ class CINExtractor(ABC):
         ww = int(rule["w"] * w)
         hh = int(rule["h"] * h)
 
-        # Sécurisation des limites
         x = max(0, x)
         y = max(0, y)
         ww = min(ww, w - x)
@@ -109,54 +113,81 @@ class CINExtractor(ABC):
 
     @staticmethod
     def normalize_date(text: str) -> str:
-        """
-        Reconstruit une date au format DD.MM.YYYY à partir de n'importe quel texte OCR
-
-        Args:
-            text: Texte brut extrait par OCR
-
-        Returns:
-            Date formatée ou texte original si invalide
-        """
         digits = re.findall(r"\d", text)
-
         if len(digits) != 8:
-            return text  # Date invalide, retourner tel quel
-
+            return text
         return "{}{}.{}{}.{}{}{}{}".format(*digits)
 
     @staticmethod
     def filter_text_by_strictness(text: str) -> bool:
-        """
-        Filtre le texte pour ne garder que les caractères valides
-        Autorise lettres (latin + arabe), chiffres, et certains symboles
-
-        Args:
-            text: Texte à filtrer
-
-        Returns:
-            True si le texte est valide
-        """
         text = str(text).strip()
         return bool(re.fullmatch(r"[A-Za-z0-9\u0600-\u06FF\s\./-]+", text))
 
-    def easyocr_text(self, zone: np.ndarray, lang) -> str:
-        """
-        Extrait le texte d'une zone avec EasyOCR
+    def _extract_texts_from_predict_result(self, results) -> List[Dict[str, Any]]:
+        extracted = []
 
-        Args:
-            zone: Zone d'image à traiter
+        for page in results:
+            texts = []
+            confs = []
 
-        Returns:
-            Texte extrait
-        """
-        if lang == "ar":
-            txt = self.reader_ar.readtext(zone, detail=0)
-        else:
-            txt = self.reader_en.readtext(zone, detail=0)
-        if isinstance(txt, list):
-            return " ".join(txt)
-        return str(txt)
+            if isinstance(page, dict):
+                for t in page.get("rec_texts", []):
+                    t = str(t).strip()
+                    if t:
+                        texts.append(t)
+
+                for s in page.get("rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            elif hasattr(page, "rec_texts") or hasattr(page, "rec_scores"):
+                for t in getattr(page, "rec_texts", []):
+                    t = str(t).strip()
+                    if t:
+                        texts.append(t)
+
+                for s in getattr(page, "rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            elif isinstance(page, (list, tuple)):
+                for item in page:
+                    try:
+                        text = str(item[1][0]).strip()
+                        score = float(item[1][1])
+                        if text:
+                            texts.append(text)
+                            confs.append(score)
+                    except Exception:
+                        pass
+
+            conf = int(sum(confs) / len(confs) * 100) if confs else 0
+
+            extracted.append({
+                "text": " ".join(texts).strip(),
+                "confidence": conf,
+                "engine": "paddleocr"
+            })
+        return extracted
+
+    def paddle_text(self, zone: np.ndarray, lang: str) -> str:
+        try:
+            reader = self.reader_ar if lang == "ar" else self.reader_fr
+            raw_result = reader.predict(zone)
+
+            extracted = self._extract_texts_from_predict_result(raw_result)
+            if not extracted:
+                return ""
+
+            return extracted[0].get("text", "").strip()
+
+        except Exception as e:
+            print("PADDLE ERROR =", repr(e))
+            return ""
 
     @staticmethod
     def is_wrong_lang(field: str, text: str) -> bool:
@@ -167,22 +198,13 @@ class CINExtractor(ABC):
         return False
 
     @staticmethod
-    def cmp_phonetic_lang(field: str, text: str, results: Dict,
-                        compare_func=None, confidence: float = 0) -> float | bool | int | Any:
-        """
-        Détermine si l'OCR doit être rejoué avec EasyOCR
-        Vérifie la cohérence entre les versions AR et FR
-
-        Args:
-            field: Nom du champ
-            text: Texte extrait
-            results: Résultats déjà extraits
-            compare_func: Fonction de comparaison AR/FR
-            threshold: Seuil de similarité
-
-        Returns:
-            True si l'OCR doit être rejoué
-        """
+    def cmp_phonetic_lang(
+        field: str,
+        text: str,
+        results: Dict,
+        compare_func=None,
+        confidence: float = 0
+    ) -> Any:
         if not field.endswith("_ar") or compare_func is None:
             return confidence
 
@@ -198,153 +220,115 @@ class CINExtractor(ABC):
 
     @staticmethod
     def reorder_identity_fields(data: Dict) -> Dict:
-        """
-        Réorganise les champs par entité métier
-        Ordre: prenom (fr, ar) -> nom (fr, ar) -> lieu_naissance (fr, ar) -> reste
-
-        Args:
-            data: Dictionnaire brut des résultats
-
-        Returns:
-            Dictionnaire réorganisé
-        """
         ordered = {}
-
         groups = ["prenom", "nom", "lieu_naissance"]
 
-        # Champs groupés fr / ar
         for g in groups:
-            fr_key = f"{g}_fr"
             ar_key = f"{g}_ar"
+            fr_key = f"{g}_fr"
 
             if ar_key in data:
                 ordered[ar_key] = data[ar_key]
             if fr_key in data:
                 ordered[fr_key] = data[fr_key]
 
-        # Le reste (dates, cin, etc.)
         for k, v in data.items():
             if k not in ordered:
                 ordered[k] = v
 
         return ordered
 
-    def create_debug_image(self, debug_img: np.ndarray, results: Dict) -> None:
-        """
-        Sauvegarde l'image de debug avec les zones annotées
-
-        Args:
-            debug_img: Image annotée
-            results: Résultats de l'extraction
-        """
+    def create_debug_image(self, debug_img: np.ndarray) -> None:
         if self.debug:
             cv2.imwrite(self.debug_image_path, debug_img)
             print(f"🟢 Image debug générée : {self.debug_image_path}")
 
-    # =============================
-    # MÉTHODES ABSTRAITES À IMPLÉMENTER
-    # =============================
-
     @abstractmethod
     def preprocess_zone(self, zone: np.ndarray) -> np.ndarray:
-        """
-        Prétraitement spécifique d'une zone avant OCR Tesseract
-        À implémenter dans les classes filles
-        """
         pass
 
     @abstractmethod
-    def preprocess_zone_easyocr(self, zone: np.ndarray) -> np.ndarray:
-        """
-        Prétraitement spécifique d'une zone avant OCR EasyOCR
-        À implémenter dans les classes filles
-        """
+    def preprocess_zone_ocr(self, zone: np.ndarray) -> np.ndarray:
         pass
 
     @abstractmethod
     def extract_text_tesseract(self, zone: np.ndarray) -> List[Dict]:
-        """
-        Extraction de texte avec Tesseract
-        À implémenter dans les classes filles
-        """
         pass
 
     @abstractmethod
     def get_confidence_threshold(self) -> int:
-        """
-        Retourne le seuil de confiance pour décider de rejouer l'OCR
-        À implémenter dans les classes filles
-        """
         pass
 
-    # =============================
-    # EXTRACTION PRINCIPALE
-    # =============================
-
     def extract(self, compare_name_func=None) -> Dict:
-        """
-        Méthode principale d'extraction
-
-        Args:
-            compare_name_func: Fonction optionnelle pour comparer les noms AR/FR
-
-        Returns:
-            Dictionnaire des champs extraits
-        """
-        # Chargement
         self.load_template()
         self.load_image()
 
         debug_img = self.img.copy()
         results = {}
 
-        # Parcours de tous les champs du template
         for field, rule in self.template["fields"].items():
             zone, (x, y, w, h) = self.safe_crop(self.img, rule)
 
-            # Annotation debug
             if self.debug:
                 cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.putText(debug_img, field, (x, y - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-            # Extraction avec Tesseract
+                cv2.putText(
+                    debug_img,
+                    field,
+                    (x, max(15, y - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 0),
+                    1
+                )
+
             zone_preprocessed = self.preprocess_zone(zone)
             blocks = self.extract_text_tesseract(zone_preprocessed)
-
-            # Filtrage des blocs
             blocks = [b for b in blocks if self.filter_text_by_strictness(b.get("text", ""))]
-            lang_field = "fr" if field.endswith("fr") else "ar"
-            if blocks:
-                ocr_text = " ".join(b.get("text", "") for b in blocks)
-                confidence = sum(b.get("confidence", 0) for b in blocks) / len(blocks)
-                if self.is_wrong_lang(field, ocr_text):
-                    zone_retry = self.preprocess_zone_easyocr(zone)
-                    ocr_text = self.easyocr_text(zone_retry, lang_field)
-                # Retry avec EasyOCR si confiance faible
-                elif field.endswith("_ar") or confidence < self.get_confidence_threshold():
-                    cmp_tesseract = self.cmp_phonetic_lang(field, ocr_text, results, compare_name_func, int(confidence/100))
-                    zone_retry = self.preprocess_zone_easyocr(zone)
-                    ocr_easyocr_text = self.easyocr_text(zone_retry,  lang_field)
-                    cmp_easyocr = self.cmp_phonetic_lang(field, ocr_easyocr_text, results, compare_name_func)
-                    ocr_text = ocr_easyocr_text if cmp_tesseract < cmp_easyocr else ocr_text
-            else:
-                # Pas de texte trouvé avec Tesseract, utiliser EasyOCR
-                zone_retry = self.preprocess_zone_easyocr(zone)
-                ocr_text = self.easyocr_text(zone_retry, lang_field)
 
-            # Normalisation des dates
+            lang_field = "fr" if field.endswith("_fr") or field == "cin" or "date" in field else "ar"
+
+            if blocks:
+                ocr_text = " ".join(str(b.get("text", "")).strip() for b in blocks).strip()
+
+                conf_values = [float(b.get("confidence", 0)) for b in blocks if str(b.get("confidence", "")).strip() != ""]
+                confidence = sum(conf_values) / len(conf_values) if conf_values else 0
+
+                if self.is_wrong_lang(field, ocr_text):
+                    zone_retry = self.preprocess_zone_ocr(zone)
+                    ocr_text = self.paddle_text(zone_retry, lang_field)
+
+                elif field.endswith("_ar") or confidence < self.get_confidence_threshold():
+                    cmp_tesseract = self.cmp_phonetic_lang(
+                        field,
+                        ocr_text,
+                        results,
+                        compare_name_func,
+                        int(confidence / 100) if confidence > 1 else confidence
+                    )
+                    zone_retry = self.preprocess_zone_ocr(zone)
+                    paddle_retry_text = self.paddle_text(zone_retry, lang_field)
+                    print(paddle_retry_text)
+                    cmp_paddle = self.cmp_phonetic_lang(
+                        field,
+                        paddle_retry_text,
+                        results,
+                        compare_name_func
+                    )
+
+                    if paddle_retry_text and cmp_tesseract < cmp_paddle:
+                        ocr_text = paddle_retry_text
+            else:
+                zone_retry = self.preprocess_zone_ocr(zone)
+                ocr_text = self.paddle_text(zone_retry, lang_field)
+
             if "date" in field:
                 ocr_text = self.normalize_date(ocr_text)
 
-            results[field] = ocr_text
+            results[field] = ocr_text.strip()
 
-        # Sauvegarde debug
         if self.debug:
             cv2.imwrite("debug_all_zones.jpg", debug_img)
 
-        self.create_debug_image(debug_img, results)
-
-        # Réorganisation des champs
+        self.create_debug_image(debug_img)
         results = self.reorder_identity_fields(results)
-
         return results

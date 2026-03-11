@@ -23,21 +23,25 @@ class CINExtractor(ABC):
         self.template_path = template_path
         self.image_path = image_path
         self.debug = debug
-        self.debug_image_path = "debug_zones.png"
+        self.debug_image_path = os.path.join(
+            "debug",
+            f"debug_zones_{os.path.basename(image_path)}.jpg"
+        )
         self.recenter_handler = recenter_handler
+        self.runtime_field_boxes = {}
 
         self.template = None
         self.img = None
         self._temp_aligned_path = None
+
         if (
-                not hasattr(CINExtractor, "_reader_ar")
-                or not hasattr(CINExtractor, "_reader_fr")
-                or CINExtractor._reader_ar is None
-                or CINExtractor._reader_fr is None
+            not hasattr(CINExtractor, "_reader_ar")
+            or not hasattr(CINExtractor, "_reader_fr")
+            or CINExtractor._reader_ar is None
+            or CINExtractor._reader_fr is None
         ):
             try:
                 import sys
-                import os
 
                 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 if parent_dir not in sys.path:
@@ -70,13 +74,36 @@ class CINExtractor(ABC):
             self.template = json.load(f)
         return self.template
 
-    def maybe_recenter_image(self) -> str:
-        """
-        Si un handler de recentrage est fourni, on génère une image alignée
-        temporaire puis on travaille dessus.
-        """
+    @staticmethod
+    def crop_with_pixel_box(
+        img: np.ndarray,
+        box: Tuple[int, int, int, int]
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        h, w = img.shape[:2]
+        x1, y1, x2, y2 = box
+
+        x1 = max(0, min(x1, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        x2 = max(x1 + 1, min(x2, w))
+        y2 = max(y1 + 1, min(y2, h))
+
+        return img[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1)
+
+    def get_field_zone(
+        self,
+        field: str,
+        rule: Dict
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        if field in self.runtime_field_boxes:
+            return self.crop_with_pixel_box(self.img, self.runtime_field_boxes[field])
+        return self.safe_crop(self.img, rule)
+
+    def maybe_recenter_image(self) -> Dict[str, Any]:
         if self.recenter_handler is None:
-            return self.image_path
+            return {
+                "image_path": self.image_path,
+                "runtime_field_boxes": {}
+            }
 
         os.makedirs("debug", exist_ok=True)
 
@@ -85,31 +112,37 @@ class CINExtractor(ABC):
         self._temp_aligned_path = temp_path
 
         try:
-            self.recenter_handler.process_card(
+            recenter_result = self.recenter_handler.process_card(
                 input_image_path=self.image_path,
                 save_aligned_path=temp_path,
                 save_debug_matches_path="debug/cin_orb_matches.jpg" if self.debug else None,
                 save_debug_polygon_path="debug/cin_orb_polygon.jpg" if self.debug else None,
-                save_debug_fields_path="debug/cin_orb_fields.jpg" if self.debug else None,
+                save_debug_fields_path="debug/cin_orb_fields_initial.jpg" if self.debug else None,
+                save_refined_fields_path="debug/cin_orb_fields_refined.jpg" if self.debug else None,
                 debug=self.debug
             )
-            return temp_path
+
+            return {
+                "image_path": temp_path,
+                "runtime_field_boxes": recenter_result.get("refined_boxes", {}) or {}
+            }
+
         except Exception as e:
             if self.debug:
                 print(f"⚠️ Recentrage ignoré, fallback image brute: {e}")
-            return self.image_path
+            return {
+                "image_path": self.image_path,
+                "runtime_field_boxes": {}
+            }
 
     def load_image(self) -> np.ndarray:
-        image_to_read = self.maybe_recenter_image()
+        recenter_payload = self.maybe_recenter_image()
+        image_to_read = recenter_payload["image_path"]
+        self.runtime_field_boxes = recenter_payload.get("runtime_field_boxes", {}) or {}
 
         self.img = cv2.imread(image_to_read)
         if self.img is None:
             raise ValueError(f"Image non trouvée: {image_to_read}")
-
-        if self.template and "width" in self.template and "height" in self.template:
-            target_size = (self.template["width"], self.template["height"])
-            if (self.img.shape[1], self.img.shape[0]) != target_size:
-                self.img = cv2.resize(self.img, target_size)
 
         return self.img
 
@@ -190,63 +223,40 @@ class CINExtractor(ABC):
                 "confidence": conf,
                 "engine": "paddleocr"
             })
+
         return extracted
 
-    def paddle_text(self, zone: np.ndarray, lang: str) -> str:
+    def paddle_text(self, zone: np.ndarray, lang: str) -> Dict[str, Any]:
         try:
             reader = self.reader_ar if lang == "ar" else self.reader_fr
 
             if zone is None or zone.size == 0:
-                print("PADDLE DEBUG -> zone vide")
-                return ""
-
-            print(f"PADDLE DEBUG -> lang={lang}, shape={zone.shape}, dtype={zone.dtype}")
+                return {"text": "", "confidence": 0, "engine": "paddleocr"}
 
             raw_result = reader.predict(zone)
-
-            print("PADDLE DEBUG -> raw_result type =", type(raw_result))
-            print("PADDLE DEBUG -> raw_result =", raw_result)
-
             extracted = self._extract_texts_from_predict_result(raw_result)
-            print("PADDLE DEBUG -> extracted =", extracted)
 
             if not extracted:
-                return ""
+                return {"text": "", "confidence": 0, "engine": "paddleocr"}
 
-            return extracted[0].get("text", "").strip()
+            return extracted[0]
 
         except Exception as e:
             print("PADDLE ERROR =", repr(e))
-            return ""
+            return {"text": "", "confidence": 0, "engine": "paddleocr"}
 
     @staticmethod
     def is_wrong_lang(field: str, text: str) -> bool:
+        text = str(text).strip()
+        if not text:
+            return False
+
         if field.endswith("_ar") and not is_arabic(text):
             return True
         if field.endswith("_fr") and is_arabic(text):
             return True
+
         return False
-
-    @staticmethod
-    def cmp_phonetic_lang(
-        field: str,
-        text: str,
-        results: Dict,
-        compare_func=None,
-        confidence: float = 0
-    ) -> Any:
-        if not field.endswith("_ar") or compare_func is None:
-            return confidence
-
-        fr_field = field.replace("_ar", "_fr")
-        if fr_field in results and results[fr_field]:
-            try:
-                cmp = compare_func(text, results[fr_field])
-                return cmp.get("score", 0)
-            except Exception:
-                return confidence
-
-        return confidence
 
     @staticmethod
     def reorder_identity_fields(data: Dict) -> Dict:
@@ -270,8 +280,55 @@ class CINExtractor(ABC):
 
     def create_debug_image(self, debug_img: np.ndarray) -> None:
         if self.debug:
+            os.makedirs(os.path.dirname(self.debug_image_path), exist_ok=True)
             cv2.imwrite(self.debug_image_path, debug_img)
             print(f"🟢 Image debug générée : {self.debug_image_path}")
+
+    def _get_field_lang(self, field: str) -> str:
+        if field.endswith("_fr") or field == "cin" or "date" in field:
+            return "fr"
+        return "ar"
+
+    def _blocks_to_result(self, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not blocks:
+            return {"text": "", "confidence": 0, "engine": "tesseract"}
+
+        text = " ".join(str(b.get("text", "")).strip() for b in blocks).strip()
+
+        conf_values = []
+        for b in blocks:
+            try:
+                c = float(b.get("confidence", 0))
+                conf_values.append(c)
+            except Exception:
+                pass
+
+        confidence = sum(conf_values) / len(conf_values) if conf_values else 0
+
+        return {
+            "text": text,
+            "confidence": confidence,
+            "engine": "tesseract"
+        }
+
+    def _should_try_paddle(
+        self,
+        field: str,
+        tesseract_result: Dict[str, Any]
+    ) -> bool:
+        text = str(tesseract_result.get("text", "")).strip()
+        confidence = float(tesseract_result.get("confidence", 0) or 0)
+
+        if not text:
+            return True
+
+        if self.is_wrong_lang(field, text):
+            return True
+
+        if confidence < self.get_confidence_threshold():
+            return True
+
+        return False
 
     @abstractmethod
     def preprocess_zone(self, zone: np.ndarray) -> np.ndarray:
@@ -297,7 +354,7 @@ class CINExtractor(ABC):
         results = {}
 
         for field, rule in self.template["fields"].items():
-            zone, (x, y, w, h) = self.safe_crop(self.img, rule)
+            zone, (x, y, w, h) = self.get_field_zone(field, rule)
 
             if self.debug:
                 cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -311,56 +368,39 @@ class CINExtractor(ABC):
                     1
                 )
 
-            zone_preprocessed = self.preprocess_zone(zone)
-            blocks = self.extract_text_tesseract(zone_preprocessed)
-            blocks = [b for b in blocks if self.filter_text_by_strictness(b.get("text", ""))]
+            zone_tesseract = self.preprocess_zone(zone)
+            tesseract_blocks = self.extract_text_tesseract(zone_tesseract)
+            tesseract_blocks = [
+                b for b in tesseract_blocks
+                if self.filter_text_by_strictness(b.get("text", ""))
+            ]
 
-            lang_field = "fr" if field.endswith("_fr") or field == "cin" or "date" in field else "ar"
+            tesseract_result = self._blocks_to_result(tesseract_blocks)
+            final_text = str(tesseract_result.get("text", "")).strip()
 
-            if blocks:
-                ocr_text = " ".join(str(b.get("text", "")).strip() for b in blocks).strip()
+            if self._should_try_paddle(field, tesseract_result):
+                lang_field = self._get_field_lang(field)
+                zone_paddle = self.preprocess_zone_ocr(zone)
+                paddle_result = self.paddle_text(zone_paddle, lang_field)
 
-                conf_values = [float(b.get("confidence", 0)) for b in blocks if str(b.get("confidence", "")).strip() != ""]
-                confidence = sum(conf_values) / len(conf_values) if conf_values else 0
+                paddle_text = str(paddle_result.get("text", "")).strip()
 
-                if self.is_wrong_lang(field, ocr_text):
-                    zone_retry = self.preprocess_zone_ocr(zone)
-                    cv2.imwrite(f"debug_{field}_paddle1.jpg", zone_retry)
-                    ocr_text = self.paddle_text(zone_retry, lang_field)
+                if paddle_text:
+                    final_text = paddle_text
 
-                elif field.endswith("_ar") or confidence < self.get_confidence_threshold():
-                    cmp_tesseract = self.cmp_phonetic_lang(
-                        field,
-                        ocr_text,
-                        results,
-                        compare_name_func,
-                        int(confidence / 100) if confidence > 1 else confidence
+                if self.debug:
+                    print(
+                        f"[OCR FALLBACK] field={field} | "
+                        f"Tesseract='{tesseract_result.get('text', '')}' "
+                        f"({tesseract_result.get('confidence', 0)}) -> "
+                        f"Paddle='{paddle_text}' "
+                        f"({paddle_result.get('confidence', 0)})"
                     )
-                    zone_retry = self.preprocess_zone_ocr(zone)
-                    cv2.imwrite(f"debug_{field}_paddle2.jpg", zone_retry)
-                    paddle_retry_text = self.paddle_text(zone_retry, lang_field)
-                    print(paddle_retry_text)
-                    cmp_paddle = self.cmp_phonetic_lang(
-                        field,
-                        paddle_retry_text,
-                        results,
-                        compare_name_func
-                    )
-
-                    if paddle_retry_text and cmp_tesseract < cmp_paddle:
-                        ocr_text = paddle_retry_text
-            else:
-                zone_retry = self.preprocess_zone_ocr(zone)
-                cv2.imwrite(f"debug_{field}_paddle3.jpg", zone_retry)
-                ocr_text = self.paddle_text(zone_retry, lang_field)
 
             if "date" in field:
-                ocr_text = self.normalize_date(ocr_text)
+                final_text = self.normalize_date(final_text)
 
-            results[field] = ocr_text.strip()
-
-        if self.debug:
-            cv2.imwrite("debug_all_zones.jpg", debug_img)
+            results[field] = final_text.strip()
 
         self.create_debug_image(debug_img)
         results = self.reorder_identity_fields(results)

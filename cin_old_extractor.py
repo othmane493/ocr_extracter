@@ -18,8 +18,12 @@ class CINOldExtractor(CINExtractor):
 
     def preprocess_zone(self, zone: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
-        gray = cv2.addWeighted(gray, 1.90, gray, -0.6, 0)
-        _, thresh = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Augmentation du contraste
+        gray = cv2.addWeighted(gray, 2.0, gray, -0.5, 0)
+
+        # Binarisation avec Otsu
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         if self.debug:
             cv2.imwrite(self.pivot_img_path, thresh)
@@ -27,14 +31,12 @@ class CINOldExtractor(CINExtractor):
         return thresh
 
     def preprocess_zone_ocr(self, zone: np.ndarray) -> np.ndarray:
-        if zone is None or zone.size == 0:
-            return zone
 
         img = zone.copy()
         h, w = img.shape[:2]
 
-        if h < 70 or w < 180:
-            img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        if h < 120 or w < 380:
+            img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
@@ -67,7 +69,7 @@ class CINOldExtractor(CINExtractor):
             return []
 
     def get_confidence_threshold(self) -> int:
-        return 60
+        return 80
 
 
 def create_cin_old_extractor(

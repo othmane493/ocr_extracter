@@ -1,284 +1,285 @@
 """
-Détecteur automatique de type de CIN et point d'entrée unifié
+Détection simple du type de CIN
+
+Règle :
+- grande photo à gauche  => CIN NEW
+- grande photo à droite  => CIN OLD
+- sinon => pas une CIN
 """
+
 import cv2
 import numpy as np
-from utils.similarity import compare_name_ar_fr
-from typing import Dict, Tuple, Optional
+from typing import Optional, Dict
+
 from cin_new_extractor import CINNewExtractor
 from cin_old_extractor import CINOldExtractor
+from utils.similarity import compare_name_ar_fr
 
 
 class CINTypeDetector:
-    """Détecteur automatique du type de CIN (nouvelle ou ancienne)"""
-    
-    # Caractéristiques distinctives
-    # Les plages sont en BGR (Blue, Green, Red) - OpenCV format
-    OLD_CIN_INDICATORS = {
-        # Anciennes CIN: bande supérieure verdâtre/jaunâtre (plus de G que R)
-        "dominant_color_range": [(100, 150, 100), (200, 255, 200)],  # Teinte verte/jaune
-        "aspect_ratio_range": (1.4, 1.8),
-    }
-
-    NEW_CIN_INDICATORS = {
-        # Nouvelles CIN: bande supérieure rose/rouge (plus de R que G et B)
-        "dominant_color_range": [(140, 140, 180), (240, 200, 255)],  # Teinte rose/rouge
-        "aspect_ratio_range": (1.4, 1.8),
-    }
 
     @staticmethod
-    def get_dominant_color(img: np.ndarray) -> Tuple[int, int, int]:
-        """
-        Calcule la couleur dominante de l'image
-        Se concentre sur la bande supérieure (20% du haut) qui est le vrai discriminant
+    def load_image(path: str):
+        img = cv2.imread(path)
 
-        Args:
-            img: Image BGR
+        if img is None:
+            raise ValueError(f"Image impossible à charger: {path}")
 
-        Returns:
-            Tuple (B, G, R) de la couleur dominante
-        """
-        # Extraire la bande supérieure (20% du haut de l'image)
-        # C'est là que se trouve la différence rose vs vert/jaune
-        h, w = img.shape[:2]
-        top_band = img[0:int(h * 0.20), :]
-
-        # Réduire la taille pour accélérer le calcul
-        small = cv2.resize(top_band, (100, 20))
-
-        # Calculer la moyenne des couleurs
-        avg_color_per_row = np.average(small, axis=0)
-        avg_color = np.average(avg_color_per_row, axis=0)
-
-        return tuple(map(int, avg_color))
+        return img
 
     @staticmethod
-    def get_aspect_ratio(img: np.ndarray) -> float:
-        """
-        Calcule le ratio largeur/hauteur
+    def skin_ratio(img):
 
-        Args:
-            img: Image
+        if img is None or img.size == 0:
+            return 0.0
 
-        Returns:
-            Ratio largeur/hauteur
-        """
-        h, w = img.shape[:2]
-        return w / h if h > 0 else 0
+        ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    @staticmethod
-    def color_in_range(color: Tuple[int, int, int],
-                      color_range: Tuple[Tuple[int, int, int], Tuple[int, int, int]]) -> bool:
-        """
-        Vérifie si une couleur est dans une plage donnée
+        mask1 = cv2.inRange(ycrcb, (0, 133, 77), (255, 180, 135))
+        mask2 = cv2.inRange(hsv, (0, 15, 40), (35, 255, 255))
 
-        Args:
-            color: Couleur à tester (B, G, R)
-            color_range: Plage [(B_min, G_min, R_min), (B_max, G_max, R_max)]
+        mask = cv2.bitwise_and(mask1, mask2)
 
-        Returns:
-            True si la couleur est dans la plage
-        """
-        min_color, max_color = color_range
-        return all(min_val <= c <= max_val
-                  for c, min_val, max_val in zip(color, min_color, max_color))
+        return np.count_nonzero(mask) / mask.size
+
 
     @classmethod
-    def detect_cin_type(cls, image_path: str) -> str:
-        """
-        Détecte automatiquement le type de CIN (OLD ou NEW)
-        Se base principalement sur la couleur de la bande supérieure
+    def score_region(cls, region):
 
-        Args:
-            image_path: Chemin vers l'image
+        if region is None or region.size == 0:
+            return -1
 
-        Returns:
-            "OLD" ou "NEW"
-        """
-        img = cv2.imread(image_path)
-        if img is None:
-            raise ValueError(f"Impossible de charger l'image: {image_path}")
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+        std = np.std(gray)
+        mean = np.mean(gray)
+
+        edges = cv2.Canny(gray, 60, 140)
+        edge_density = np.count_nonzero(edges) / edges.size
+
+        skin = cls.skin_ratio(region)
+
+        score = 0
+
+        score += min(std / 50, 1) * 4
+        score += min(edge_density / 0.12, 1) * 2
+        score += min(skin / 0.2, 1) * 5
+
+        if 60 < mean < 210:
+            score += 1
+
+        return score
+
+
+    @classmethod
+    def sliding_search(cls, img, x1, x2, y1, y2):
+
+        region = img[y1:y2, x1:x2]
+
+        rh, rw = region.shape[:2]
+
+        if rh <= 0 or rw <= 0:
+            return None
+
+        best = None
+
+        widths = [
+            int(rw * 0.35),
+            int(rw * 0.42),
+            int(rw * 0.50)
+        ]
+
+        heights = [
+            int(rh * 0.50),
+            int(rh * 0.60),
+            int(rh * 0.70)
+        ]
+
+        for w in widths:
+
+            for h in heights:
+
+                if w < 40 or h < 60:
+                    continue
+
+                ratio = w / h
+
+                if ratio < 0.45 or ratio > 0.9:
+                    continue
+
+                step_x = max(10, w // 6)
+                step_y = max(10, h // 6)
+
+                for y in range(0, rh - h, step_y):
+
+                    for x in range(0, rw - w, step_x):
+
+                        roi = region[y:y + h, x:x + w]
+
+                        score = cls.score_region(roi)
+
+                        candidate = {
+                            "x": x1 + x,
+                            "y": y1 + y,
+                            "w": w,
+                            "h": h,
+                            "score": score
+                        }
+
+                        if best is None or score > best["score"]:
+                            best = candidate
+
+        return best
+
+
+    @classmethod
+    def detect_big_photo(cls, image_path):
+
+        img = cls.load_image(image_path)
 
         h, w = img.shape[:2]
 
-        # Extraire la bande supérieure (25% du haut) pour analyse
-        top_band = img[0:int(h * 0.25), :]
+        left_zone = (
+            int(w * 0.03),
+            int(w * 0.48),
+            int(h * 0.10),
+            int(h * 0.82)
+        )
 
-        # Analyser la couleur dominante de la bande supérieure
-        dominant_color = cls.get_dominant_color(img)  # Utilise déjà la bande supérieure
-        aspect_ratio = cls.get_aspect_ratio(img)
+        right_zone = (
+            int(w * 0.52),
+            int(w * 0.97),
+            int(h * 0.10),
+            int(h * 0.82)
+        )
 
-        # Score pour chaque type
-        old_score = 0
-        new_score = 0
+        left_best = cls.sliding_search(
+            img,
+            left_zone[0],
+            left_zone[1],
+            left_zone[2],
+            left_zone[3]
+        )
 
-        # 1. Test couleur dominante (poids: 3 points)
-        if cls.color_in_range(dominant_color, cls.OLD_CIN_INDICATORS["dominant_color_range"]):
-            old_score += 3
-            print(f"   ✓ Couleur correspond à OLD (vert/jaune)")
+        right_best = cls.sliding_search(
+            img,
+            right_zone[0],
+            right_zone[1],
+            right_zone[2],
+            right_zone[3]
+        )
 
-        if cls.color_in_range(dominant_color, cls.NEW_CIN_INDICATORS["dominant_color_range"]):
-            new_score += 3
-            print(f"   ✓ Couleur correspond à NEW (rose/rouge)")
+        left_score = left_best["score"] if left_best else -1
+        right_score = right_best["score"] if right_best else -1
 
-        # 2. Analyse HSV de la bande supérieure (poids: 4 points)
-        hsv_band = cv2.cvtColor(top_band, cv2.COLOR_BGR2HSV)
-        avg_hue = np.mean(hsv_band[:, :, 0])
-        avg_saturation = np.mean(hsv_band[:, :, 1])
+        if left_score < 5 and right_score < 5:
+            return None
 
-        # Anciennes CIN : teinte jaune-vert (20-60 en HSV) avec saturation faible
-        # Nouvelles CIN : peuvent avoir diverses teintes mais R>G dans la bande rose
-        if 20 <= avg_hue <= 60 and avg_saturation < 60:
-            old_score += 4
-            print(f"   ✓ Teinte HSV {avg_hue:.1f} + Saturation faible → OLD (jaune-vert)")
-        elif avg_hue >= 140 or avg_hue <= 10:
-            new_score += 4
-            print(f"   ✓ Teinte HSV {avg_hue:.1f} → NEW (rose-rouge)")
+        if left_score > right_score:
+            left_best["side"] = "left"
+            return left_best
 
-        # 3. Test du ratio Rouge/Vert dans la bande supérieure (poids: 5 points - CRITÈRE PRINCIPAL)
-        # Nouvelles CIN ont plus de rouge, anciennes ont plus de vert
-        # C'est le critère le plus fiable !
-        b, g, r = dominant_color
-        if r > g and r > b:  # Plus de rouge
-            new_score += 5
-            print(f"   ✓ R>G>B ({r}>{g}>{b}) → NEW [CRITÈRE PRINCIPAL]")
-        elif g >= r:  # Plus de vert ou égal
-            old_score += 5
-            print(f"   ✓ G≥R ({g}≥{r}) → OLD [CRITÈRE PRINCIPAL]")
+        right_best["side"] = "right"
+        return right_best
 
-        # 4. Test saturation (poids: 2 points)
-        # Les nouvelles CIN ont tendance à être plus saturées (rose vif)
-        if avg_saturation > 100:
-            new_score += 2
-            print(f"   ✓ Saturation élevée ({avg_saturation:.0f}) → NEW")
-        elif avg_saturation < 80:
-            old_score += 2
-            print(f"   ✓ Saturation faible ({avg_saturation:.0f}) → OLD")
 
-        # Décision finale
-        print(f"\n📊 Scores finaux: OLD={old_score}, NEW={new_score}")
-        print(f"   Couleur dominante BGR: {dominant_color}")
-        print(f"   Aspect ratio: {aspect_ratio:.2f}")
-        print(f"   Teinte HSV: {avg_hue:.1f}")
-        print(f"   Saturation: {avg_saturation:.1f}")
+    @classmethod
+    def detect_big_photo_side(cls, image_path):
 
-        # En cas d'égalité, privilégier NEW (plus récent)
-        if new_score > old_score:
+        result = cls.detect_big_photo(image_path)
+
+        if result is None:
+            return None
+
+        return result["side"]
+
+
+    @classmethod
+    def detect_cin_type(cls, image_path):
+
+        side = cls.detect_big_photo_side(image_path)
+
+        if side == "left":
             return "NEW"
-        elif old_score > new_score:
+
+        if side == "right":
             return "OLD"
-        else:
-            # Égalité: utiliser la teinte comme arbitre
-            print(f"   ⚖️  Égalité! Utilisation de la teinte comme arbitre")
-            return "OLD" if 20 <= avg_hue <= 90 else "NEW"
+
+        raise ValueError("Photo CIN non détectée")
 
 
 class UnifiedCINExtractor:
-    """Point d'entrée unifié pour l'extraction de CIN"""
 
     DEFAULT_TEMPLATES = {
         "NEW": "config/cin_new_template.json",
         "OLD": "config/cin_old_template.json"
     }
 
-    def __init__(self, image_path: str,
-                 cin_type: Optional[str] = None,
-                 template_path: Optional[str] = None,
-                 debug: bool = True):
-        """
-        Initialise l'extracteur unifié
+    def __init__(
+        self,
+        image_path,
+        cin_type=None,
+        template_path=None,
+        debug=True
+    ):
 
-        Args:
-            image_path: Chemin vers l'image CIN
-            cin_type: Type de CIN ("OLD" ou "NEW", auto-détecté si None)
-            template_path: Chemin vers le template (auto si None)
-            debug: Active le mode debug
-        """
         self.image_path = image_path
         self.debug = debug
 
-        # Détection automatique du type si non fourni
         if cin_type is None:
             self.cin_type = CINTypeDetector.detect_cin_type(image_path)
-            print(f"✨ Type détecté automatiquement: CIN {self.cin_type}")
         else:
             self.cin_type = cin_type.upper()
 
-        # Détermination du template
         if template_path is None:
+
             self.template_path = self.DEFAULT_TEMPLATES.get(self.cin_type)
+
             if self.template_path is None:
                 raise ValueError(f"Type de CIN inconnu: {self.cin_type}")
+
         else:
             self.template_path = template_path
 
-        # Création de l'extracteur approprié
         if self.cin_type == "NEW":
-            self.extractor = CINNewExtractor(self.template_path, self.image_path, self.debug)
+
+            self.extractor = CINNewExtractor(
+                self.template_path,
+                self.image_path,
+                self.debug
+            )
+
         elif self.cin_type == "OLD":
-            self.extractor = CINOldExtractor(self.template_path, self.image_path, self.debug)
+
+            self.extractor = CINOldExtractor(
+                self.template_path,
+                self.image_path,
+                self.debug
+            )
+
         else:
-            raise ValueError(f"Type de CIN non supporté: {self.cin_type}")
-
-        print(f"🔧 Extracteur initialisé: {self.extractor.__class__.__name__}")
-
-    def extract(self, compare_name_func=None) -> Dict:
-        """
-        Lance l'extraction des données
-
-        Args:
-            compare_name_func: Fonction optionnelle pour comparer les noms AR/FR
-
-        Returns:
-            Dictionnaire des champs extraits
-        """
-        print(f"🚀 Extraction en cours avec {self.extractor.__class__.__name__}...")
-        return self.extractor.extract(compare_name_func)
-
-    @staticmethod
-    def extract_from_image(image_path: str,
-                          cin_type: Optional[str] = None,
-                          compare_name_func=None,
-                          debug: bool = True) -> Dict:
-        """
-        Méthode statique pratique pour extraire directement d'une image
-
-        Args:
-            image_path: Chemin vers l'image
-            cin_type: Type de CIN (auto-détecté si None)
-            compare_name_func: Fonction de comparaison AR/FR
-            debug: Mode debug
-
-        Returns:
-            Dictionnaire des champs extraits
-        """
-        extractor = UnifiedCINExtractor(image_path, cin_type, debug=debug)
-        return extractor.extract(compare_name_func)
+            raise ValueError(f"Type de CIN invalide: {self.cin_type}")
 
 
-# Fonction de commodité pour l'import simple
-def extract_cin(image_path: str,
-               cin_type: Optional[str] = None,
-               debug: bool = True) -> Dict:
-    """
-    Fonction simple pour extraire les données d'une CIN
+    def extract(self, compare_name_func=compare_name_ar_fr):
 
-    Args:
-        image_path: Chemin vers l'image
-        cin_type: "OLD", "NEW" ou None (auto-détection)
-        compare_name_func: Fonction de comparaison AR/FR (optionnel)
-        debug: Active le mode debug
+        return self.extractor.extract(compare_name_func=compare_name_func)
 
-    Returns:
-        Dictionnaire des champs extraits
 
-    Exemple:
-        >>> data = extract_cin("images/cin_new.png")
-        >>> print(data["nom_fr"])
-    """
-    return UnifiedCINExtractor.extract_from_image(
-        image_path,
-        cin_type,
-        compare_name_ar_fr,
-        debug
+
+def extract_cin(
+    image_path,
+    cin_type=None,
+    template_path=None,
+    debug=True
+):
+
+    extractor = UnifiedCINExtractor(
+        image_path=image_path,
+        cin_type=cin_type,
+        template_path=template_path,
+        debug=debug
     )
+
+    return extractor.extract(compare_name_func=compare_name_ar_fr)

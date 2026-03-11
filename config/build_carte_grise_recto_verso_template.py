@@ -186,8 +186,8 @@ class CarteGriseZoneGenerator:
         self.document_name = document_name
         self.reader_langs = reader_langs or ['ar', 'en']
         self.reader = easyocr.Reader(self.reader_langs, gpu=gpu)
-        self.ref_w = 1680
-        self.ref_h = 1058
+        self.ref_w = 996
+        self.ref_h = 627
         self.img = cv2.imread(image_path)
         if self.img is None:
             raise ValueError(f"Impossible de lire l'image: {image_path}")
@@ -448,21 +448,21 @@ class CarteGriseZoneGenerator:
             return
 
         if fr_box:
-            x1 = fr_box["x1"] - 25
+            x1 = fr_box["x1"]
         else:
-            x1 = int(self.w * 0.05)
+            x1 = int(self.w * 0.10)
 
         if ar_box:
-            x2 = ar_box["x1"] + 70
+            x2 = ar_box["x1"] + 50
         else:
             x2 = int(self.w * 0.86)
 
         if fr_box and ar_box:
-            y1 = min(fr_box["y2"], ar_box["y2"]) - 20
+            y1 = min(fr_box["y2"], ar_box["y2"]) - 12
         elif fr_box:
-            y1 = fr_box["y2"] - 20
+            y1 = fr_box["y2"] - 12
         else:
-            y1 = ar_box["y2"] - 20
+            y1 = ar_box["y2"] - 12
 
         expiry_top_candidates = []
         if expiry_fr_box:
@@ -471,7 +471,7 @@ class CarteGriseZoneGenerator:
             expiry_top_candidates.append(expiry_ar_box["y1"])
 
         if expiry_top_candidates:
-            y2 = min(expiry_top_candidates) - 8
+            y2 = min(expiry_top_candidates) + 5
         else:
             if ar_box:
                 y2 = ar_box["y2"] + int(self.h * 0.12)
@@ -666,25 +666,25 @@ class CarteGriseZoneGenerator:
         """
         Corrections manuelles sur image normalisée 1680x1058.
         """
-        # previous_registration : réduire la largeur à droite
-        if field == "previous_registration":
-            x2 = 1367
-
+        if field == "expiry_date":
+            x2 = x2 - 110
         # Number_chassis : réduire la largeur à droite
         elif field == "Number_chassis":
-            x2 = 1277
+            x2 = 760
 
         # Poids_vide : réduire la largeur à droite
         elif field == "Poids_vide":
-            x2 = 1315
+            x2 = 750
+            y1 = int(y1 + ((y2 - y1) / 2))
 
         # PTRA : réduire la largeur à droite
         elif field == "PTRA":
-            x2 = 1150
+            x2 = 675
 
         # PTAC : réduire un peu à droite + réduire hauteur basse
         elif field == "PTAC":
-            x2 = 1360
+            x2 = 750
+            y2 = int(y2 - ((y2 - y1)/2))
 
         x1 = self.clamp(x1, 0, self.w - 1)
         y1 = self.clamp(y1, 0, self.h - 1)

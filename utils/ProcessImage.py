@@ -69,7 +69,7 @@ class ProcessImage:
         processed = self.preprocess_date(black_threshold, scale)
         return processed
 
-    def mode_tesseract(self, scale: float = 1.5):
+    def mode_tesseract(self, scale: float = 2.5):
         """
         Prétraitement optimisé pour Tesseract carte grise
         """
@@ -101,7 +101,7 @@ class ProcessImage:
     def process(self, mode: str):
         modes = {
             "mode_cg_pytesseract": self.mode_tesseract,
-            "mode_cg_ocr": lambda: self.mode_ocr(black_threshold=148, scale=1.0),
+            "mode_cg_ocr": lambda: self.mode_ocr(black_threshold=135, scale=1.0),
             "mode_cg_paddle": self.mode_paddle,
             "detect_double_dash": self.detect_double_dash,
         }

@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
-from typing import List, Dict, Optional
-
+from typing import List, Dict
 from cin_extractor_base import CINExtractor
 
 
@@ -28,18 +27,19 @@ class CINOldExtractor(CINExtractor):
         return thresh
 
     def preprocess_zone_ocr(self, zone: np.ndarray) -> np.ndarray:
-        """
-        On garde le nom pour compatibilité, mais ce preprocess sert maintenant à Paddle.
-        """
-        img_big = cv2.resize(zone, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(img_big, cv2.COLOR_BGR2GRAY)
+        if zone is None or zone.size == 0:
+            return zone
 
-        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
+        img = zone.copy()
+        h, w = img.shape[:2]
 
-        sharpened = cv2.addWeighted(gray, 2.1, gray, -0.5, 0)
-        _, thresh = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return thresh
+        if h < 70 or w < 180:
+            img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+        return img
 
     def preprocessing_alternative(self, img: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)

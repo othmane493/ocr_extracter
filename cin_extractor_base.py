@@ -29,20 +29,38 @@ class CINExtractor(ABC):
         self.template = None
         self.img = None
         self._temp_aligned_path = None
+        if (
+                not hasattr(CINExtractor, "_reader_ar")
+                or not hasattr(CINExtractor, "_reader_fr")
+                or CINExtractor._reader_ar is None
+                or CINExtractor._reader_fr is None
+        ):
+            try:
+                import sys
+                import os
 
-        if not hasattr(CINExtractor, "_reader_ar") or CINExtractor._reader_ar is None:
-            CINExtractor._reader_ar = PaddleOCR(
-                lang="ar",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False
-            )
+                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if parent_dir not in sys.path:
+                    sys.path.insert(0, parent_dir)
 
-        if not hasattr(CINExtractor, "_reader_fr") or CINExtractor._reader_fr is None:
-            CINExtractor._reader_fr = PaddleOCR(
-                lang="fr",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False
-            )
+                from ocr_manager import get_paddle_reader
+                CINExtractor._reader_ar, CINExtractor._reader_fr = get_paddle_reader()
+                print("[INFO] Paddle readers récupérés depuis ocr_manager.")
+
+            except (ImportError, Exception) as e:
+                print(f"[WARN] Impossible d'utiliser ocr_manager, fallback local PaddleOCR: {e}")
+
+                CINExtractor._reader_ar = PaddleOCR(
+                    lang="ar",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
+
+                CINExtractor._reader_fr = PaddleOCR(
+                    lang="fr",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False
+                )
 
         self.reader_ar = CINExtractor._reader_ar
         self.reader_fr = CINExtractor._reader_fr
@@ -177,9 +195,21 @@ class CINExtractor(ABC):
     def paddle_text(self, zone: np.ndarray, lang: str) -> str:
         try:
             reader = self.reader_ar if lang == "ar" else self.reader_fr
+
+            if zone is None or zone.size == 0:
+                print("PADDLE DEBUG -> zone vide")
+                return ""
+
+            print(f"PADDLE DEBUG -> lang={lang}, shape={zone.shape}, dtype={zone.dtype}")
+
             raw_result = reader.predict(zone)
 
+            print("PADDLE DEBUG -> raw_result type =", type(raw_result))
+            print("PADDLE DEBUG -> raw_result =", raw_result)
+
             extracted = self._extract_texts_from_predict_result(raw_result)
+            print("PADDLE DEBUG -> extracted =", extracted)
+
             if not extracted:
                 return ""
 
@@ -295,6 +325,7 @@ class CINExtractor(ABC):
 
                 if self.is_wrong_lang(field, ocr_text):
                     zone_retry = self.preprocess_zone_ocr(zone)
+                    cv2.imwrite(f"debug_{field}_paddle1.jpg", zone_retry)
                     ocr_text = self.paddle_text(zone_retry, lang_field)
 
                 elif field.endswith("_ar") or confidence < self.get_confidence_threshold():
@@ -306,6 +337,7 @@ class CINExtractor(ABC):
                         int(confidence / 100) if confidence > 1 else confidence
                     )
                     zone_retry = self.preprocess_zone_ocr(zone)
+                    cv2.imwrite(f"debug_{field}_paddle2.jpg", zone_retry)
                     paddle_retry_text = self.paddle_text(zone_retry, lang_field)
                     print(paddle_retry_text)
                     cmp_paddle = self.cmp_phonetic_lang(
@@ -319,6 +351,7 @@ class CINExtractor(ABC):
                         ocr_text = paddle_retry_text
             else:
                 zone_retry = self.preprocess_zone_ocr(zone)
+                cv2.imwrite(f"debug_{field}_paddle3.jpg", zone_retry)
                 ocr_text = self.paddle_text(zone_retry, lang_field)
 
             if "date" in field:

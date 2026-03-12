@@ -127,7 +127,7 @@ def extract_document():
                 recto_template_json="config/carte_grise_recto_template.json",
                 verso_template_json="config/carte_grise_verso_template.json"
             )
-            result = extractor.extract(filepath, document_type, debug=True)
+            result = extractor.extract(filepath, document_type, debug=False)
 
         extraction_time = time.time() - extraction_start
         total_time = time.time() - start_time

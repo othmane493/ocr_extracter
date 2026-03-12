@@ -811,7 +811,7 @@ class CarteGriseExtractor:
         if self._is_matricule_field(field_name):
             return not (self._is_valid_matricule_value(normalized_value) and confidence > 80)
 
-        if confidence < 70:
+        if confidence < 80:
             return True
 
         return False
@@ -1131,6 +1131,7 @@ class CarteGriseExtractor:
                     if ocr_mode == "tesseract":
                         t0 = time.perf_counter()
                         tess_res = self._ocr_tesseract_zone(zone, field_name=field_name)
+                        print("tesseract_res:", tess_res)
                         self._add_timing("tesseract_loop_total", time.perf_counter() - t0)
 
                         tess_value = self._normalize_final_value(field_name, tess_res["text"], pattern)
@@ -1153,6 +1154,7 @@ class CarteGriseExtractor:
                         if need_retry:
                             t1 = time.perf_counter()
                             retry_res = self._retry_with_paddle_for_tesseract_field(zone, field_name, pattern)
+                            print("Paddle_res:", retry_res)
                             self._add_timing("tesseract_retry_paddle_total", time.perf_counter() - t1)
 
                             best = self._choose_best_tesseract_or_retry(
@@ -1214,9 +1216,11 @@ class CarteGriseExtractor:
 
             with self._timer("paddle_fr_batch_total"):
                 fr_results = self._ocr_paddle_batch([job["image"] for job in fr_jobs], lang="fr")
+                print("Paddle_res_fr:", fr_results)
 
             with self._timer("paddle_ar_batch_total"):
                 ar_results = self._ocr_paddle_batch([job["image"] for job in ar_jobs], lang="ar")
+                print("Paddle_res_ar:", ar_results)
 
             with self._timer("merge_fr_results"):
                 for job, ocr_res in zip(fr_jobs, fr_results):

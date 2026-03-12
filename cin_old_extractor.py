@@ -9,14 +9,14 @@ class CINOldExtractor(CINExtractor):
         self,
         template_path: str,
         image_path: str,
-        debug: bool = True,
+        debug: bool = False,
         recenter_handler=None
     ):
         super().__init__(template_path, image_path, debug, recenter_handler=recenter_handler)
         self.cin_type = "CIN_OLD"
         self.pivot_img_path = "enhanced_cin_old.jpg"
 
-    def preprocess_zone(self, zone: np.ndarray) -> np.ndarray:
+    def preprocess_zone(self, zone: np.ndarray, scale : float = 2.0) -> np.ndarray:
         gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
 
         # Augmentation du contraste
@@ -27,19 +27,17 @@ class CINOldExtractor(CINExtractor):
 
         if self.debug:
             cv2.imwrite(self.pivot_img_path, thresh)
+        h, w = thresh.shape[:2]
+        return cv2.resize(thresh, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-        return thresh
-
-    def preprocess_zone_ocr(self, zone: np.ndarray) -> np.ndarray:
+    def preprocess_zone_ocr(self, zone: np.ndarray, lang: str, scale : float = 2.0) -> np.ndarray:
 
         img = zone.copy()
-        h, w = img.shape[:2]
 
-        if h < 120 or w < 380:
-            img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        if lang == "ar":
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
         return img
 
@@ -75,7 +73,7 @@ class CINOldExtractor(CINExtractor):
 def create_cin_old_extractor(
     image_path: str,
     template_path: str = "config/cin_old_template.json",
-    debug: bool = True,
+    debug: bool = False,
     recenter_handler=None
 ) -> CINOldExtractor:
     return CINOldExtractor(

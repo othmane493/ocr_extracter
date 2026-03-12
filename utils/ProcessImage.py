@@ -52,24 +52,23 @@ class ProcessImage:
         result = np.where(gray <= black_threshold, 0, 255).astype(np.uint8)
         return result
 
-    def preprocess_date(self, thresh: float, scale: float = 3.0, img: Optional[np.ndarray] = None) -> np.ndarray:
+    def preprocess_date(self, scale: float = 3.0, img: Optional[np.ndarray] = None) -> np.ndarray:
         img = img if img is not None else self.image
         gray = self.to_gray(img)
         gray = self.resize(scale, gray)
-        _, binary = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
-        return binary
+        return gray
 
     # -------------------------
     # Modes de traitement
     # -------------------------
-    def mode_ocr(self, black_threshold=145, scale=1.0) -> np.ndarray:
+    def mode_ocr(self, scale=1.0) -> np.ndarray:
         """
         Prétraitement générique pour OCR.
         """
-        processed = self.preprocess_date(black_threshold, scale)
+        processed = self.preprocess_date(scale)
         return processed
 
-    def mode_tesseract(self, scale: float = 2.5):
+    def mode_tesseract(self, scale: float = 1.0):
         """
         Prétraitement optimisé pour Tesseract carte grise
         """
@@ -80,15 +79,6 @@ class ProcessImage:
         thresh = self.resize(scale, thresh)
         #cv2.imwrite(f"debug_{time.time()}.jpg", thresh)
         return thresh, self.image
-
-    def mode_paddle(self) -> np.ndarray:
-        """
-        Prétraitement léger pour PaddleOCR.
-        """
-        gray = self.to_gray(self.image)
-        gray = self.resize(2.0, gray)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        return gray
 
     def detect_double_dash(self) -> str:
         gray = self.to_gray(self.image)
@@ -101,8 +91,7 @@ class ProcessImage:
     def process(self, mode: str):
         modes = {
             "mode_cg_pytesseract": self.mode_tesseract,
-            "mode_cg_ocr": lambda: self.mode_ocr(black_threshold=135, scale=1.0),
-            "mode_cg_paddle": self.mode_paddle,
+            "mode_cg_ocr": lambda: self.mode_ocr(scale=0.82),
             "detect_double_dash": self.detect_double_dash,
         }
 

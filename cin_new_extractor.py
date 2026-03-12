@@ -12,13 +12,13 @@ class CINNewExtractor(CINExtractor):
         self,
         template_path: str,
         image_path: str,
-        debug: bool = True,
+        debug: bool = False,
         recenter_handler=None
     ):
         super().__init__(template_path, image_path, debug, recenter_handler=recenter_handler)
         self.cin_type = "CIN_NEW"
 
-    def preprocess_zone(self, zone: np.ndarray) -> np.ndarray:
+    def preprocess_zone(self, zone: np.ndarray, scale: float = 2.0) -> np.ndarray:
         """
         Prétraitement pour Tesseract - CIN New
         Contraste élevé et binarisation Otsu
@@ -37,13 +37,20 @@ class CINNewExtractor(CINExtractor):
         # Binarisation avec Otsu
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        return thresh
+        h, w = thresh.shape[:2]
+        return cv2.resize(thresh, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-    def preprocess_zone_ocr(self, zone: np.ndarray) -> np.ndarray:
+    def preprocess_zone_ocr(self, zone: np.ndarray, lang : str, scale: float = 1.5) -> np.ndarray:
         """
         On garde le nom pour compatibilité, mais ce preprocess sert maintenant à Paddle.
         """
+        if lang == "ar":
+            zone = cv2.resize(zone, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+            zone = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
         return zone
+
 
     def extract_text_tesseract(self, zone: np.ndarray) -> List[Dict]:
         """
@@ -77,7 +84,7 @@ class CINNewExtractor(CINExtractor):
 # Fonction utilitaire pour créer une instance rapidement
 def create_cin_new_extractor(image_path: str,
                             template_path: str = "config/cin_new_template.json",
-                            debug: bool = True) -> CINNewExtractor:
+                            debug: bool = False) -> CINNewExtractor:
     """
     Créé une instance de CINNewExtractor
 

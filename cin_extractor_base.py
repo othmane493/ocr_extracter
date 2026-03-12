@@ -17,7 +17,7 @@ class CINExtractor(ABC):
         self,
         template_path: str,
         image_path: str,
-        debug: bool = True,
+        debug: bool = False,
         recenter_handler=None
     ):
         self.template_path = template_path
@@ -335,7 +335,7 @@ class CINExtractor(ABC):
         pass
 
     @abstractmethod
-    def preprocess_zone_ocr(self, zone: np.ndarray) -> np.ndarray:
+    def preprocess_zone_ocr(self, zone: np.ndarray, lang : str) -> np.ndarray:
         pass
 
     @abstractmethod
@@ -380,7 +380,7 @@ class CINExtractor(ABC):
 
             if self._should_try_paddle(field, tesseract_result):
                 lang_field = self._get_field_lang(field)
-                zone_paddle = self.preprocess_zone_ocr(zone)
+                zone_paddle = self.preprocess_zone_ocr(zone, lang_field)
                 paddle_result = self.paddle_text(zone_paddle, lang_field)
 
                 paddle_text = str(paddle_result.get("text", "")).strip()

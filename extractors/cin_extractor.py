@@ -9,7 +9,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from cin_detector import extract_cin
+from unified_cin_extractor import extract_cin
 from config.CinRecenter import CINORBAligner
 
 
@@ -44,6 +44,6 @@ class CINExtractor:
             image_path=image_path,
             cin_type=detected_type,
             template_path=template_path,
-            debug=True,
+            debug=False,
             recenter_handler=recenter_handler
         )

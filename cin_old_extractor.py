@@ -1,10 +1,11 @@
 import cv2
 import numpy as np
-from typing import List, Dict
-from cin_extractor_base import CINExtractor
+from typing import Dict, List, Any
+
+from cin_extractor_base import BaseCINExtractor
 
 
-class CINOldExtractor(CINExtractor):
+class CINOldExtractor(BaseCINExtractor):
     def __init__(
         self,
         template_path: str,
@@ -40,24 +41,6 @@ class CINOldExtractor(CINExtractor):
             img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
         return img
-
-    def preprocessing_alternative(self, img: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        alpha = 2.0
-        beta = -180
-        enhanced = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
-
-        _, mask = cv2.threshold(enhanced, 70, 255, cv2.THRESH_BINARY)
-        mask_inv = cv2.bitwise_not(mask)
-
-        text_only = cv2.bitwise_and(enhanced, enhanced, mask=mask)
-        background = cv2.bitwise_and(gray, gray, mask=mask_inv)
-        background = cv2.GaussianBlur(background, (5, 5), 0)
-
-        final = cv2.add(text_only, background)
-        cv2.imwrite(self.pivot_img_path, final)
-        return cv2.imread(self.pivot_img_path)
 
     def extract_text_tesseract(self, zone: np.ndarray) -> List[Dict]:
         try:

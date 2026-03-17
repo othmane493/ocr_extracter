@@ -12,6 +12,8 @@ Extracteur de cartes grises marocaines (Recto / Verso)
 - Réduction des marges blanches autour du texte avant OCR
 - Séparation intelligente address_fr / address_ar
 - Conserve Normalize + transform_json + extract_ar
+- Readers Paddle, executor global et locks récupérés depuis ocr_manager
+- Tesseract fields exécutés via pool global partagé
 """
 
 import re
@@ -20,6 +22,8 @@ import unicodedata
 import time
 from datetime import datetime
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from typing import Dict, Any, List, Optional
 
 import cv2
@@ -44,13 +48,6 @@ except ImportError:
 
 
 class CarteGriseExtractor:
-    """
-    Fusion des deux versions :
-    - Pipeline PaddleOCR = version 1
-    - Pipeline Tesseract + detect_double_dash = version 2
-    - Retry Paddle ciblé pour les champs Tesseract douteux
-    """
-
     FIELDS_KEY_RECTO = {
         "registration_number_matriculate": {
             "fr": "Numéro d'immatriculation",
@@ -260,26 +257,42 @@ class CarteGriseExtractor:
         self.config = None
         self._current_timings = None
 
-        if (
+        try:
+            import sys
+            import os
+
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+
+            from ocr_manager import get_paddle_reader, get_ocr_executor, get_ocr_locks
+
+            if (
+                not hasattr(CarteGriseExtractor, "_reader_ar")
+                or not hasattr(CarteGriseExtractor, "_reader_fr")
+                or not hasattr(CarteGriseExtractor, "_executor")
+                or not hasattr(CarteGriseExtractor, "_paddle_lock")
+                or not hasattr(CarteGriseExtractor, "_tesseract_lock")
+                or CarteGriseExtractor._reader_ar is None
+                or CarteGriseExtractor._reader_fr is None
+                or CarteGriseExtractor._executor is None
+                or CarteGriseExtractor._paddle_lock is None
+                or CarteGriseExtractor._tesseract_lock is None
+            ):
+                CarteGriseExtractor._reader_ar, CarteGriseExtractor._reader_fr = get_paddle_reader()
+                CarteGriseExtractor._executor = get_ocr_executor()
+                CarteGriseExtractor._paddle_lock, CarteGriseExtractor._tesseract_lock = get_ocr_locks()
+                print("[INFO] CarteGriseExtractor: readers/executor/locks récupérés depuis ocr_manager.")
+
+        except (ImportError, Exception) as e:
+            print(f"[WARN] Impossible d'utiliser ocr_manager, fallback local PaddleOCR/executor: {e}")
+
+            if (
                 not hasattr(CarteGriseExtractor, "_reader_ar")
                 or not hasattr(CarteGriseExtractor, "_reader_fr")
                 or CarteGriseExtractor._reader_ar is None
                 or CarteGriseExtractor._reader_fr is None
-        ):
-            try:
-                import sys
-                import os
-
-                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                if parent_dir not in sys.path:
-                    sys.path.insert(0, parent_dir)
-
-                from ocr_manager import get_paddle_reader
-                CarteGriseExtractor._reader_ar, CarteGriseExtractor._reader_fr = get_paddle_reader()
-                print("[INFO] Paddle readers récupérés depuis ocr_manager.")
-            except (ImportError, Exception) as e:
-                print(f"[WARN] Impossible d'utiliser ocr_manager, fallback local PaddleOCR: {e}")
-
+            ):
                 t0 = time.perf_counter()
                 CarteGriseExtractor._reader_fr = PaddleOCR(
                     lang="fr",
@@ -296,10 +309,26 @@ class CarteGriseExtractor:
                 )
                 print(f"[PERF] init Paddle AR fallback: {time.perf_counter() - t0:.4f}s")
 
+            if not hasattr(CarteGriseExtractor, "_executor") or CarteGriseExtractor._executor is None:
+                CarteGriseExtractor._executor = ThreadPoolExecutor(
+                    max_workers=4,
+                    thread_name_prefix="ocr-worker"
+                )
+
+            if not hasattr(CarteGriseExtractor, "_paddle_lock") or CarteGriseExtractor._paddle_lock is None:
+                CarteGriseExtractor._paddle_lock = Lock()
+
+            if not hasattr(CarteGriseExtractor, "_tesseract_lock") or CarteGriseExtractor._tesseract_lock is None:
+                CarteGriseExtractor._tesseract_lock = Lock()
+
         self.reader_ar = CarteGriseExtractor._reader_ar
         self.reader_fr = CarteGriseExtractor._reader_fr
+        self.executor = CarteGriseExtractor._executor
+        self._paddle_lock = CarteGriseExtractor._paddle_lock
+        self._tesseract_lock = CarteGriseExtractor._tesseract_lock
 
         init_start = time.perf_counter()
+
         t0 = time.perf_counter()
         with open(recto_template_json, "r", encoding="utf-8") as f:
             self.recto_template = json.load(f)
@@ -348,11 +377,10 @@ class CarteGriseExtractor:
             self._current_timings[name] = self._current_timings.get(name, 0.0) + elapsed
 
     def _get_paddle_reader(self, lang: str) -> PaddleOCR:
-        return (
-            CarteGriseExtractor._reader_ar
-            if lang == "ar"
-            else CarteGriseExtractor._reader_fr
-        )
+        return self.reader_ar if lang == "ar" else self.reader_fr
+
+    def get_default_max_workers(self) -> int:
+        return 4
 
     @staticmethod
     def _ensure_bgr(img):
@@ -488,6 +516,7 @@ class CarteGriseExtractor:
     def _safe_text_join(words: List[str]) -> str:
         words = [w.strip() for w in words if w and w.strip()]
         return " ".join(words).strip()
+
     @staticmethod
     def _poly_to_rect(poly) -> Optional[Dict[str, float]]:
         try:
@@ -544,7 +573,6 @@ class CarteGriseExtractor:
 
     def _extract_texts_from_predict_result(self, results, lang: str = "fr") -> List[Dict[str, Any]]:
         t0 = time.perf_counter()
-
         extracted = []
 
         for page in results:
@@ -625,6 +653,7 @@ class CarteGriseExtractor:
                         if not text:
                             continue
 
+                            rect = None
                         rect = None
                         if item and item[0]:
                             rect = self._poly_to_rect(item[0])
@@ -655,6 +684,7 @@ class CarteGriseExtractor:
 
         self._add_timing("extract_texts_from_predict_result", time.perf_counter() - t0)
         return extracted
+
     @staticmethod
     def _box_from_template_field(template_field: Dict, ref_w: int, ref_h: int) -> Dict:
         x = int(template_field["x"] * ref_w)
@@ -808,7 +838,8 @@ class CarteGriseExtractor:
         reader = self._get_paddle_reader(lang)
 
         with self._timer(f"paddle_predict_{lang}"):
-            results = reader.predict(prepared)
+            with self._paddle_lock:
+                results = reader.predict(prepared)
 
         return self._extract_texts_from_predict_result(results, lang=lang)
 
@@ -824,11 +855,12 @@ class CarteGriseExtractor:
         self._add_timing("tesseract_preprocess", time.perf_counter() - t1)
 
         def run_tesseract(img, config):
-            data = pytesseract.image_to_data(
-                img,
-                config=config,
-                output_type=Output.DICT
-            )
+            with self._tesseract_lock:
+                data = pytesseract.image_to_data(
+                    img,
+                    config=config,
+                    output_type=Output.DICT
+                )
 
             words = []
             confs = []
@@ -857,7 +889,6 @@ class CarteGriseExtractor:
                 "engine": "tesseract"
             }
 
-        # Cas dates : plusieurs essais
         if field_name.endswith("_date"):
             candidates = []
 
@@ -884,12 +915,9 @@ class CarteGriseExtractor:
             self._add_timing("tesseract_total", time.perf_counter() - t0)
             return best[1]
 
-        # Cas immatriculation/chassis
         elif "registration" in field_name or "chassis" in field_name:
             whitelist = r" -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
             custom_config = rf'--oem 3 --psm 7{whitelist}'
-
-        # Cas général
         else:
             custom_config = r'--oem 3 --psm 7'
 
@@ -898,6 +926,7 @@ class CarteGriseExtractor:
         self._add_timing("tesseract_image_to_data", time.perf_counter() - t1)
         self._add_timing("tesseract_total", time.perf_counter() - t0)
         return res
+
     def _should_retry_tesseract_with_paddle(
         self,
         field_name: str,
@@ -985,9 +1014,65 @@ class CarteGriseExtractor:
     def _save_debug_zone(self, name: str, img):
         if img is None or img.size == 0:
             return
-        #cv2.imwrite(f"debug_{name}.jpg", img)
+        # cv2.imwrite(f"debug_{name}.jpg", img)
 
-    def extract(self, image_path: str, document_type: str, debug: bool = False, return_profile: bool = False):
+    def _process_tesseract_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        field_name = job["field_name"]
+        pattern = job["pattern"]
+        zone = job["image"]
+        box = job["box"]
+
+        t0 = time.perf_counter()
+        tess_res = self._ocr_tesseract_zone(zone, field_name=field_name)
+        self._add_timing("tesseract_loop_total", time.perf_counter() - t0)
+
+        tess_value = self._normalize_final_value(field_name, tess_res["text"], pattern)
+        tess_conf = int(tess_res["confidence"])
+
+        need_retry = self._should_retry_tesseract_with_paddle(
+            field_name=field_name,
+            normalized_value=tess_value,
+            confidence=tess_conf,
+            context_dates=None
+        )
+
+        final_value = tess_value
+        final_conf = tess_conf
+
+        if need_retry:
+            t1 = time.perf_counter()
+            retry_res = self._retry_with_paddle_for_tesseract_field(zone, field_name, pattern)
+            self._add_timing("tesseract_retry_paddle_total", time.perf_counter() - t1)
+
+            best = self._choose_best_tesseract_or_retry(
+                field_name=field_name,
+                tess_value=tess_value,
+                tess_conf=tess_conf,
+                retry_value=retry_res["text"],
+                retry_conf=int(retry_res["confidence"]),
+                context_dates=None
+            )
+            final_value = best["value"]
+            final_conf = int(best["confidence"])
+
+        return {
+            "field_name": field_name,
+            "value": final_value,
+            "confidence": final_conf,
+            "box": box,
+            "zone": zone,
+            "pattern": pattern,
+            "is_date": self._is_likely_date_field(field_name)
+        }
+
+    def extract(
+        self,
+        image_path: str,
+        document_type: str,
+        debug: bool = False,
+        return_profile: bool = False,
+        max_workers: Optional[int] = None
+    ):
         timings = {}
         self._current_timings = timings
         global_start = time.perf_counter()
@@ -1080,6 +1165,7 @@ class CarteGriseExtractor:
 
                 fr_jobs = []
                 ar_jobs = []
+                tesseract_jobs = []
                 tesseract_retry_candidates = {}
 
                 def make_empty_item(field_conf):
@@ -1126,7 +1212,7 @@ class CarteGriseExtractor:
                                 "slot": "fr",
                                 "pattern": pattern,
                                 "box": self._box_from_template_field(template_fields[fr_zone_name], ref_w, ref_h),
-                                "image": fr_zone
+                                "image": fr_zone.copy()
                             })
 
                         if ar_zone is not None:
@@ -1135,7 +1221,7 @@ class CarteGriseExtractor:
                                 "slot": "ar",
                                 "pattern": pattern,
                                 "box": self._box_from_template_field(template_fields[ar_zone_name], ref_w, ref_h),
-                                "image": ar_zone
+                                "image": ar_zone.copy()
                             })
                         continue
 
@@ -1165,8 +1251,8 @@ class CarteGriseExtractor:
                         fr_end = max(1, split_x - margin)
                         ar_start = min(w - 1, split_x + margin)
 
-                        fr_zone = zone[:, :fr_end]
-                        ar_zone = zone[:, ar_start:]
+                        fr_zone = zone[:, :fr_end].copy()
+                        ar_zone = zone[:, ar_start:].copy()
 
                         if debug:
                             debug_zone = self._ensure_bgr(zone.copy())
@@ -1210,6 +1296,7 @@ class CarteGriseExtractor:
                     if zone is None or zone_name not in template_fields:
                         continue
 
+                    zone = zone.copy()
                     box = self._box_from_template_field(template_fields[zone_name], ref_w, ref_h)
                     ocr_mode = field_conf.get("ocr", "fr")
 
@@ -1232,62 +1319,12 @@ class CarteGriseExtractor:
                             continue
 
                     if ocr_mode == "tesseract":
-                        t0 = time.perf_counter()
-                        tess_res = self._ocr_tesseract_zone(zone, field_name=field_name)
-                        print("tesseract_res:", tess_res)
-                        self._add_timing("tesseract_loop_total", time.perf_counter() - t0)
-
-                        tess_value = self._normalize_final_value(field_name, tess_res["text"], pattern)
-                        tess_conf = int(tess_res["confidence"])
-
-                        context_dates = {
-                            "expiry_date": result_map.get("expiry_date", {}).get("fr", {}).get("value", "")
-                        }
-
-                        need_retry = self._should_retry_tesseract_with_paddle(
-                            field_name=field_name,
-                            normalized_value=tess_value,
-                            confidence=tess_conf,
-                            context_dates=context_dates
-                        )
-
-                        final_value = tess_value
-                        final_conf = tess_conf
-
-                        if need_retry:
-                            t1 = time.perf_counter()
-                            retry_res = self._retry_with_paddle_for_tesseract_field(zone, field_name, pattern)
-                            print("Paddle_res:", retry_res)
-                            self._add_timing("tesseract_retry_paddle_total", time.perf_counter() - t1)
-
-                            best = self._choose_best_tesseract_or_retry(
-                                field_name=field_name,
-                                tess_value=tess_value,
-                                tess_conf=tess_conf,
-                                retry_value=retry_res["text"],
-                                retry_conf=int(retry_res["confidence"]),
-                                context_dates=context_dates
-                            )
-                            final_value = best["value"]
-                            final_conf = int(best["confidence"])
-
-                        result_map[field_name]["fr"].update({
-                            "value": final_value,
-                            "confidence": final_conf,
-                            **box
+                        tesseract_jobs.append({
+                            "field_name": field_name,
+                            "pattern": pattern,
+                            "box": box,
+                            "image": zone
                         })
-                        result_map[field_name]["ar"].update({
-                            "value": final_value,
-                            "confidence": final_conf,
-                            **box
-                        })
-
-                        if self._is_likely_date_field(field_name):
-                            tesseract_retry_candidates[field_name] = {
-                                "zone": zone,
-                                "pattern": pattern,
-                                "box": box
-                            }
                         continue
 
                     if field_name == "registration_number_matriculate":
@@ -1317,13 +1354,64 @@ class CarteGriseExtractor:
                             "image": zone
                         })
 
+            workers = max_workers or self.get_default_max_workers()
+
+            if debug:
+                print(
+                    f"[EXTRACT] workers demandés={workers} | executor_global_id={id(self.executor)}"
+                )
+
+            use_local_executor = max_workers is not None and max_workers != self.get_default_max_workers()
+
+            executor_to_use = (
+                ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ocr-local")
+                if use_local_executor
+                else self.executor
+            )
+
+            try:
+                with self._timer("tesseract_parallel_total"):
+                    futures = {
+                        executor_to_use.submit(self._process_tesseract_job, job): job["field_name"]
+                        for job in tesseract_jobs
+                    }
+
+                    for future in as_completed(futures):
+                        field_name = futures[future]
+                        try:
+                            out = future.result()
+
+                            result_map[field_name]["fr"].update({
+                                "value": out["value"],
+                                "confidence": out["confidence"],
+                                **out["box"]
+                            })
+                            result_map[field_name]["ar"].update({
+                                "value": out["value"],
+                                "confidence": out["confidence"],
+                                **out["box"]
+                            })
+
+                            if out["is_date"]:
+                                tesseract_retry_candidates[field_name] = {
+                                    "zone": out["zone"],
+                                    "pattern": out["pattern"],
+                                    "box": out["box"]
+                                }
+
+                        except Exception as e:
+                            print(f"[THREAD ERROR] field={field_name} -> {repr(e)}")
+                            result_map[field_name]["fr"]["value"] = ""
+                            result_map[field_name]["ar"]["value"] = ""
+            finally:
+                if use_local_executor:
+                    executor_to_use.shutdown(wait=True)
+
             with self._timer("paddle_fr_batch_total"):
                 fr_results = self._ocr_paddle_batch([job["image"] for job in fr_jobs], lang="fr")
-                print("Paddle_res_fr:", fr_results)
 
             with self._timer("paddle_ar_batch_total"):
                 ar_results = self._ocr_paddle_batch([job["image"] for job in ar_jobs], lang="ar")
-                print("Paddle_res_ar:", ar_results)
 
             with self._timer("merge_fr_results"):
                 for job, ocr_res in zip(fr_jobs, fr_results):
@@ -1382,8 +1470,6 @@ class CarteGriseExtractor:
                             **job["box"]
                         })
 
-            # 2e passage métier pour dates :
-            # maintenant expiry_date est connue, on peut revalider les autres dates.
             with self._timer("post_validate_dates_total"):
                 expiry_value = result_map.get("expiry_date", {}).get("fr", {}).get("value", "")
                 context_dates = {"expiry_date": expiry_value}

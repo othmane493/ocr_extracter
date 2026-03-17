@@ -5,43 +5,30 @@ Supporte: CIN Old, CIN New, Carte Grise Recto, Carte Grise Verso
 import os
 import sys
 import time
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
 from pathlib import Path
 
-# Ajouter le répertoire courant au path
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import des extracteurs
 from extractors.cin_extractor import CINExtractor
 from extractors.carte_grise_extractor import CarteGriseExtractor
+from ocr_manager import OCRManager
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
 
-# Créer le dossier uploads
 Path(app.config['UPLOAD_FOLDER']).mkdir(exist_ok=True)
 
-# Initialiser les modèles OCR au démarrage (une seule fois)
-print("=" * 70)
-print("Initialisation des modèles OCR au démarrage...")
-print("=" * 70)
-from ocr_manager import OCRManager
-ocr_manager = OCRManager()  # Charge EasyOCR une seule fois
-print("Modèles OCR prêts !")
-print("=" * 70)
-
-
 def allowed_file(filename):
-    """Vérifie si l'extension du fichier est autorisée"""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 
 def cleanup_file(filepath):
-    """Supprime un fichier temporaire de manière sécurisée"""
     try:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -52,7 +39,6 @@ def cleanup_file(filepath):
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Endpoint de santé pour vérifier que l'API fonctionne"""
     return jsonify({
         'status': 'ok',
         'service': 'Document Extraction API',
@@ -62,25 +48,15 @@ def health_check():
             'cin_new',
             'carte_grise_recto',
             'carte_grise_verso'
-        ]
+        ],
+        'ocr_ready': OCRManager.is_ready()
     }), 200
 
 
 @app.route('/extract', methods=['POST'])
 def extract_document():
-    """
-    Endpoint principal pour l'extraction de documents
-    Détection automatique du type de document
-
-    Paramètres:
-        - file: Fichier image du document
-
-    Retour:
-        JSON contenant les données extraites
-    """
     start_time = time.time()
 
-    # Validation du fichier
     if 'file' not in request.files:
         return jsonify({
             'error': 'Aucun fichier fourni',
@@ -101,7 +77,6 @@ def extract_document():
             'message': f'Extensions autorisées: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'
         }), 400
 
-    # Sauvegarde temporaire du fichier
     filename = secure_filename(file.filename)
     timestamp = int(time.time() * 1000)
     unique_filename = f"{timestamp}_{filename}"
@@ -110,19 +85,17 @@ def extract_document():
     try:
         file.save(filepath)
 
-        # Détection automatique du type de document
         from extractors.document_detector import detect_document_type
         document_type = detect_document_type(filepath)
 
         print(f"Type détecté automatiquement: {document_type}")
 
-        # Extraction selon le type détecté
         extraction_start = time.time()
 
         if document_type in ['cin_old', 'cin_new']:
             extractor = CINExtractor()
             result = extractor.extract(filepath, document_type)
-        else:  # carte_grise_recto ou carte_grise_verso
+        else:
             extractor = CarteGriseExtractor(
                 recto_template_json="config/carte_grise_recto_template.json",
                 verso_template_json="config/carte_grise_verso_template.json"
@@ -132,10 +105,8 @@ def extract_document():
         extraction_time = time.time() - extraction_start
         total_time = time.time() - start_time
 
-        # Nettoyage du fichier temporaire
         cleanup_file(filepath)
 
-        # Retour du résultat
         return jsonify({
             'success': True,
             'document_type': document_type,
@@ -151,7 +122,6 @@ def extract_document():
         }), 200
 
     except Exception as e:
-        # Nettoyage en cas d'erreur
         cleanup_file(filepath)
 
         print(f"Erreur lors de l'extraction: {str(e)}")
@@ -166,7 +136,6 @@ def extract_document():
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
-    """Gestion des fichiers trop volumineux"""
     return jsonify({
         'error': 'Fichier trop volumineux',
         'message': 'La taille maximale autorisée est de 16MB'
@@ -175,7 +144,6 @@ def request_entity_too_large(error):
 
 @app.errorhandler(404)
 def not_found(error):
-    """Gestion des routes non trouvées"""
     return jsonify({
         'error': 'Route non trouvée',
         'message': 'Endpoint non disponible. Utilisez /health ou /extract'
@@ -184,14 +152,24 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    """Gestion des erreurs internes"""
     return jsonify({
         'error': 'Erreur interne du serveur',
         'message': 'Une erreur inattendue s\'est produite'
     }), 500
 
+def init_ocr():
+    print("=" * 70)
+    print("Initialisation des modèles OCR au démarrage...")
+    print("=" * 70)
+
+    OCRManager()
+    OCRManager.warmup()
+
+    print("Modèles OCR prêts !")
+    print("=" * 70)
 
 if __name__ == '__main__':
+    init_ocr()
     print("=" * 70)
     print("Démarrage de l'API d'extraction de documents")
     print("=" * 70)
@@ -210,4 +188,4 @@ if __name__ == '__main__':
     print("\nServeur démarré sur http://0.0.0.0:5000")
     print("Appuyez sur Ctrl+C pour arrêter\n")
 
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)

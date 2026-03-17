@@ -18,7 +18,6 @@ class CINExtractor:
         pass
 
     def extract(self, image_path, cin_type):
-
         if cin_type == "cin_old":
             detected_type = "OLD"
             template_path = "config/cin_old_template.json"

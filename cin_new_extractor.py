@@ -4,10 +4,10 @@ Extracteur spécialisé pour les nouvelles CIN marocaines
 import cv2
 import numpy as np
 from typing import List, Dict
-from cin_extractor_base import CINExtractor
+from cin_extractor_base import BaseCINExtractor
 
 
-class CINNewExtractor(CINExtractor):
+class CINNewExtractor(BaseCINExtractor):
     def __init__(
         self,
         template_path: str,

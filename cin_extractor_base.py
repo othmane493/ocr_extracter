@@ -3,6 +3,8 @@ import os
 import re
 import tempfile
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from typing import Dict, Tuple, List, Any, Optional
 
 import cv2
@@ -12,7 +14,7 @@ from paddleocr import PaddleOCR
 from json_transformer import is_arabic
 
 
-class CINExtractor(ABC):
+class BaseCINExtractor(ABC):
     def __init__(
         self,
         template_path: str,
@@ -34,40 +36,75 @@ class CINExtractor(ABC):
         self.img = None
         self._temp_aligned_path = None
 
-        if (
-            not hasattr(CINExtractor, "_reader_ar")
-            or not hasattr(CINExtractor, "_reader_fr")
-            or CINExtractor._reader_ar is None
-            or CINExtractor._reader_fr is None
-        ):
-            try:
-                import sys
+        try:
+            import sys
 
-                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                if parent_dir not in sys.path:
-                    sys.path.insert(0, parent_dir)
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
 
-                from ocr_manager import get_paddle_reader
-                CINExtractor._reader_ar, CINExtractor._reader_fr = get_paddle_reader()
-                print("[INFO] Paddle readers récupérés depuis ocr_manager.")
+            from ocr_manager import get_paddle_reader, get_ocr_executor, get_ocr_locks
 
-            except (ImportError, Exception) as e:
-                print(f"[WARN] Impossible d'utiliser ocr_manager, fallback local PaddleOCR: {e}")
+            if (
+                not hasattr(BaseCINExtractor, "_reader_ar")
+                or not hasattr(BaseCINExtractor, "_reader_fr")
+                or not hasattr(BaseCINExtractor, "_executor")
+                or not hasattr(BaseCINExtractor, "_paddle_lock")
+                or not hasattr(BaseCINExtractor, "_tesseract_lock")
+                or BaseCINExtractor._reader_ar is None
+                or BaseCINExtractor._reader_fr is None
+                or BaseCINExtractor._executor is None
+                or BaseCINExtractor._paddle_lock is None
+                or BaseCINExtractor._tesseract_lock is None
+            ):
+                BaseCINExtractor._reader_ar, BaseCINExtractor._reader_fr = get_paddle_reader()
+                BaseCINExtractor._executor = get_ocr_executor()
+                BaseCINExtractor._paddle_lock, BaseCINExtractor._tesseract_lock = get_ocr_locks()
 
-                CINExtractor._reader_ar = PaddleOCR(
+                if debug:
+                    print(
+                        f"[OCR INIT] readers/executor/locks récupérés depuis ocr_manager | "
+                        f"executor_id={id(BaseCINExtractor._executor)}"
+                    )
+
+        except (ImportError, Exception) as e:
+            print(f"[WARN] Impossible d'utiliser ocr_manager, fallback local: {e}")
+
+            if (
+                not hasattr(BaseCINExtractor, "_reader_ar")
+                or not hasattr(BaseCINExtractor, "_reader_fr")
+                or BaseCINExtractor._reader_ar is None
+                or BaseCINExtractor._reader_fr is None
+            ):
+                BaseCINExtractor._reader_ar = PaddleOCR(
                     lang="ar",
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False
                 )
 
-                CINExtractor._reader_fr = PaddleOCR(
+                BaseCINExtractor._reader_fr = PaddleOCR(
                     lang="fr",
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False
                 )
 
-        self.reader_ar = CINExtractor._reader_ar
-        self.reader_fr = CINExtractor._reader_fr
+            if not hasattr(BaseCINExtractor, "_executor") or BaseCINExtractor._executor is None:
+                BaseCINExtractor._executor = ThreadPoolExecutor(
+                    max_workers=4,
+                    thread_name_prefix="ocr-worker"
+                )
+
+            if not hasattr(BaseCINExtractor, "_paddle_lock") or BaseCINExtractor._paddle_lock is None:
+                BaseCINExtractor._paddle_lock = Lock()
+
+            if not hasattr(BaseCINExtractor, "_tesseract_lock") or BaseCINExtractor._tesseract_lock is None:
+                BaseCINExtractor._tesseract_lock = Lock()
+
+        self.reader_ar = BaseCINExtractor._reader_ar
+        self.reader_fr = BaseCINExtractor._reader_fr
+        self.executor = BaseCINExtractor._executor
+        self._paddle_lock = BaseCINExtractor._paddle_lock
+        self._tesseract_lock = BaseCINExtractor._tesseract_lock
 
     def load_template(self) -> Dict:
         with open(self.template_path, encoding="utf-8") as f:
@@ -443,12 +480,59 @@ class CINExtractor(ABC):
 
         return False
 
+    def get_default_max_workers(self) -> int:
+        nb_fields = len(self.template.get("fields", {})) if self.template else 1
+        return min(4, max(1, nb_fields))
+
+    def _process_single_field(self, field: str, rule: Dict) -> Tuple[str, str, Tuple[int, int, int, int]]:
+        zone, (x, y, w, h) = self.get_field_zone(field, rule)
+
+        zone = zone.copy()
+        zone_tesseract = self.preprocess_zone(zone.copy())
+
+        with self._tesseract_lock:
+            tesseract_blocks = self.extract_text_tesseract(zone_tesseract)
+
+        tesseract_blocks = [
+            b for b in tesseract_blocks
+            if self.filter_text_by_strictness(b.get("text", ""))
+        ]
+
+        tesseract_result = self._blocks_to_result(tesseract_blocks)
+        final_text = str(tesseract_result.get("text", "")).strip()
+
+        if self._should_try_paddle(field, tesseract_result):
+            lang_field = self._get_field_lang(field)
+            zone_paddle = self.preprocess_zone_ocr(zone.copy(), lang_field)
+
+            with self._paddle_lock:
+                paddle_result = self.paddle_text(zone_paddle, lang_field)
+
+            paddle_text = str(paddle_result.get("text", "")).strip()
+
+            if paddle_text:
+                final_text = paddle_text
+
+            if self.debug:
+                print(
+                    f"[OCR FALLBACK] field={field} | "
+                    f"Tesseract='{tesseract_result.get('text', '')}' "
+                    f"({tesseract_result.get('confidence', 0)}) -> "
+                    f"Paddle='{paddle_text}' "
+                    f"({paddle_result.get('confidence', 0)})"
+                )
+
+        if "date" in field:
+            final_text = self.normalize_date(final_text)
+
+        return field, final_text.strip(), (x, y, w, h)
+
     @abstractmethod
     def preprocess_zone(self, zone: np.ndarray) -> np.ndarray:
         pass
 
     @abstractmethod
-    def preprocess_zone_ocr(self, zone: np.ndarray, lang : str) -> np.ndarray:
+    def preprocess_zone_ocr(self, zone: np.ndarray, lang: str) -> np.ndarray:
         pass
 
     @abstractmethod
@@ -459,21 +543,62 @@ class CINExtractor(ABC):
     def get_confidence_threshold(self) -> int:
         pass
 
-    def extract(self, compare_name_func=None) -> Dict:
+    def extract(self, compare_name_func=None, max_workers: Optional[int] = None) -> Dict:
         self.load_template()
         self.load_image()
 
         debug_img = self.img.copy()
-        results = {}
+        debug_boxes = []
 
-        for field, rule in self.template["fields"].items():
-            zone, (x, y, w, h) = self.get_field_zone(field, rule)
+        fields_items = list(self.template["fields"].items())
+        ordered_results = {field: "" for field, _ in fields_items}
 
-            if self.debug:
+        workers = max_workers or self.get_default_max_workers()
+
+        if self.debug:
+            print(
+                f"[EXTRACT] workers demandés={workers} | "
+                f"executor_global_id={id(self.executor)}"
+            )
+
+        use_local_executor = max_workers is not None and max_workers != self.get_default_max_workers()
+
+        executor_to_use = (
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ocr-local")
+            if use_local_executor
+            else self.executor
+        )
+
+        try:
+            futures = {
+                executor_to_use.submit(self._process_single_field, field, rule): (field, rule)
+                for field, rule in fields_items
+            }
+
+            for future in as_completed(futures):
+                field, rule = futures[future]
+                try:
+                    field_name, final_text, box = future.result()
+                    ordered_results[field_name] = final_text
+
+                    if self.debug:
+                        debug_boxes.append((field_name, box))
+
+                except Exception as e:
+                    if self.debug:
+                        print(f"[THREAD ERROR] field={field} -> {repr(e)}")
+                    ordered_results[field] = ""
+
+        finally:
+            if use_local_executor:
+                executor_to_use.shutdown(wait=True)
+
+        if self.debug:
+            for field_name, (x, y, w, h) in debug_boxes:
                 cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 cv2.putText(
                     debug_img,
-                    field,
+                    field_name,
                     (x, max(15, y - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.45,
@@ -481,40 +606,6 @@ class CINExtractor(ABC):
                     1
                 )
 
-            zone_tesseract = self.preprocess_zone(zone)
-            tesseract_blocks = self.extract_text_tesseract(zone_tesseract)
-            tesseract_blocks = [
-                b for b in tesseract_blocks
-                if self.filter_text_by_strictness(b.get("text", ""))
-            ]
-
-            tesseract_result = self._blocks_to_result(tesseract_blocks)
-            final_text = str(tesseract_result.get("text", "")).strip()
-
-            if self._should_try_paddle(field, tesseract_result):
-                lang_field = self._get_field_lang(field)
-                zone_paddle = self.preprocess_zone_ocr(zone, lang_field)
-                paddle_result = self.paddle_text(zone_paddle, lang_field)
-
-                paddle_text = str(paddle_result.get("text", "")).strip()
-
-                if paddle_text:
-                    final_text = paddle_text
-
-                if self.debug:
-                    print(
-                        f"[OCR FALLBACK] field={field} | "
-                        f"Tesseract='{tesseract_result.get('text', '')}' "
-                        f"({tesseract_result.get('confidence', 0)}) -> "
-                        f"Paddle='{paddle_text}' "
-                        f"({paddle_result.get('confidence', 0)})"
-                    )
-
-            if "date" in field:
-                final_text = self.normalize_date(final_text)
-
-            results[field] = final_text.strip()
-
         self.create_debug_image(debug_img)
-        results = self.reorder_identity_fields(results)
-        return results
+        ordered_results = self.reorder_identity_fields(ordered_results)
+        return ordered_results

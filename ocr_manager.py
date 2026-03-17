@@ -46,7 +46,7 @@ class OCRManager:
 
             # Pool global partagé par toute l'application
             OCRManager._executor = ThreadPoolExecutor(
-                max_workers=4,
+                max_workers=3,
                 thread_name_prefix="ocr-worker"
             )
 

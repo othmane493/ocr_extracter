@@ -311,7 +311,7 @@ class CarteGriseExtractor:
 
             if not hasattr(CarteGriseExtractor, "_executor") or CarteGriseExtractor._executor is None:
                 CarteGriseExtractor._executor = ThreadPoolExecutor(
-                    max_workers=4,
+                    max_workers=3,
                     thread_name_prefix="ocr-worker"
                 )
 

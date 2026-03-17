@@ -90,7 +90,7 @@ class BaseCINExtractor(ABC):
 
             if not hasattr(BaseCINExtractor, "_executor") or BaseCINExtractor._executor is None:
                 BaseCINExtractor._executor = ThreadPoolExecutor(
-                    max_workers=4,
+                    max_workers=3,
                     thread_name_prefix="ocr-worker"
                 )
 

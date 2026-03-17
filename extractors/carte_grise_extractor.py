@@ -427,14 +427,6 @@ class CarteGriseExtractor:
             img = ProcessImage(image=img).process("mode_cg_ocr")
             if len(img.shape) == 2:
                 img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        #elif lang == "ar":
-        #    # pour la matricule on ne passe pas par mode_cg_ocr,
-        #    # mais on peut renforcer légèrement le contraste
-        #    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        #    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        #    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        #    img = cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
-        #    cv2.imwrite(f"debug_{time.time()}.jpg", img)
 
         self._add_timing(f"prepare_zone_{lang}", time.perf_counter() - t0)
         return img
@@ -496,7 +488,173 @@ class CarteGriseExtractor:
     def _safe_text_join(words: List[str]) -> str:
         words = [w.strip() for w in words if w and w.strip()]
         return " ".join(words).strip()
+    @staticmethod
+    def _poly_to_rect(poly) -> Optional[Dict[str, float]]:
+        try:
+            xs = [float(p[0]) for p in poly]
+            ys = [float(p[1]) for p in poly]
+            return {
+                "x1": min(xs),
+                "y1": min(ys),
+                "x2": max(xs),
+                "y2": max(ys),
+                "cx": (min(xs) + max(xs)) / 2.0,
+                "cy": (min(ys) + max(ys)) / 2.0,
+                "h": max(1.0, max(ys) - min(ys))
+            }
+        except Exception:
+            return None
 
+    def _join_paddle_tokens_in_reading_order(self, tokens: List[Dict[str, Any]], lang: str) -> str:
+        if not tokens:
+            return ""
+
+        tokens = [t for t in tokens if t.get("text")]
+        if not tokens:
+            return ""
+
+        avg_h = sum(float(t["rect"]["h"]) for t in tokens if t.get("rect")) / max(1, len(tokens))
+        line_tol = max(10.0, avg_h * 0.6)
+
+        tokens.sort(key=lambda t: (t["rect"]["cy"], t["rect"]["cx"]))
+
+        lines: List[List[Dict[str, Any]]] = []
+        for token in tokens:
+            placed = False
+            for line in lines:
+                line_cy = sum(float(x["rect"]["cy"]) for x in line) / len(line)
+                if abs(float(token["rect"]["cy"]) - line_cy) <= line_tol:
+                    line.append(token)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([token])
+
+        lines.sort(key=lambda line: min(float(t["rect"]["y1"]) for t in line))
+
+        line_texts = []
+        for line in lines:
+            reverse_x = (lang == "ar")
+            line.sort(key=lambda t: float(t["rect"]["cx"]), reverse=reverse_x)
+            text = self._safe_text_join([str(t["text"]) for t in line])
+            if text:
+                line_texts.append(text)
+
+        return " ".join(line_texts).strip()
+
+    def _extract_texts_from_predict_result(self, results, lang: str = "fr") -> List[Dict[str, Any]]:
+        t0 = time.perf_counter()
+
+        extracted = []
+
+        for page in results:
+            tokens = []
+            confs = []
+
+            if isinstance(page, dict):
+                rec_texts = page.get("rec_texts", []) or []
+                rec_scores = page.get("rec_scores", []) or []
+                dt_polys = page.get("dt_polys", []) or []
+
+                for idx, raw_text in enumerate(rec_texts):
+                    text = self.clean_invisible_chars(str(raw_text))
+                    if not text:
+                        continue
+
+                    rect = None
+                    if idx < len(dt_polys):
+                        rect = self._poly_to_rect(dt_polys[idx])
+
+                    tokens.append({
+                        "text": text,
+                        "rect": rect or {
+                            "x1": float(idx),
+                            "y1": 0.0,
+                            "x2": float(idx) + 1.0,
+                            "y2": 1.0,
+                            "cx": float(idx) + 0.5,
+                            "cy": 0.5,
+                            "h": 1.0
+                        }
+                    })
+
+                for s in rec_scores:
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            elif hasattr(page, "rec_texts") or hasattr(page, "rec_scores"):
+                rec_texts = getattr(page, "rec_texts", []) or []
+                rec_scores = getattr(page, "rec_scores", []) or []
+                dt_polys = getattr(page, "dt_polys", []) or []
+
+                for idx, raw_text in enumerate(rec_texts):
+                    text = self.clean_invisible_chars(str(raw_text))
+                    if not text:
+                        continue
+
+                    rect = None
+                    if idx < len(dt_polys):
+                        rect = self._poly_to_rect(dt_polys[idx])
+
+                    tokens.append({
+                        "text": text,
+                        "rect": rect or {
+                            "x1": float(idx),
+                            "y1": 0.0,
+                            "x2": float(idx) + 1.0,
+                            "y2": 1.0,
+                            "cx": float(idx) + 0.5,
+                            "cy": 0.5,
+                            "h": 1.0
+                        }
+                    })
+
+                for s in getattr(page, "rec_scores", []):
+                    try:
+                        confs.append(float(s))
+                    except Exception:
+                        pass
+
+            elif isinstance(page, (list, tuple)):
+                for idx, item in enumerate(page):
+                    try:
+                        text = self.clean_invisible_chars(str(item[1][0]))
+                        score = float(item[1][1])
+                        if not text:
+                            continue
+
+                        rect = None
+                        if item and item[0]:
+                            rect = self._poly_to_rect(item[0])
+
+                        tokens.append({
+                            "text": text,
+                            "rect": rect or {
+                                "x1": float(idx),
+                                "y1": 0.0,
+                                "x2": float(idx) + 1.0,
+                                "y2": 1.0,
+                                "cx": float(idx) + 0.5,
+                                "cy": 0.5,
+                                "h": 1.0
+                            }
+                        })
+                        confs.append(score)
+                    except Exception:
+                        pass
+
+            conf = int(sum(confs) / len(confs) * 100) if confs else 0
+
+            extracted.append({
+                "text": self._join_paddle_tokens_in_reading_order(tokens, lang=lang),
+                "confidence": conf,
+                "engine": "paddleocr"
+            })
+
+        self._add_timing("extract_texts_from_predict_result", time.perf_counter() - t0)
+        return extracted
     @staticmethod
     def _box_from_template_field(template_field: Dict, ref_w: int, ref_h: int) -> Dict:
         x = int(template_field["x"] * ref_w)
@@ -640,61 +798,6 @@ class CarteGriseExtractor:
         self._add_timing("choose_best_matricule", time.perf_counter() - t0)
         return cleaned_candidates[0]
 
-    def _extract_texts_from_predict_result(self, results) -> List[Dict[str, Any]]:
-        t0 = time.perf_counter()
-
-        extracted = []
-
-        for page in results:
-            texts = []
-            confs = []
-
-            if isinstance(page, dict):
-                for t in page.get("rec_texts", []):
-                    t = self.clean_invisible_chars(str(t))
-                    if t:
-                        texts.append(t)
-
-                for s in page.get("rec_scores", []):
-                    try:
-                        confs.append(float(s))
-                    except Exception:
-                        pass
-
-            elif hasattr(page, "rec_texts") or hasattr(page, "rec_scores"):
-                for t in getattr(page, "rec_texts", []):
-                    t = self.clean_invisible_chars(str(t))
-                    if t:
-                        texts.append(t)
-
-                for s in getattr(page, "rec_scores", []):
-                    try:
-                        confs.append(float(s))
-                    except Exception:
-                        pass
-
-            elif isinstance(page, (list, tuple)):
-                for item in page:
-                    try:
-                        text = self.clean_invisible_chars(str(item[1][0]))
-                        score = float(item[1][1])
-                        if text:
-                            texts.append(text)
-                            confs.append(score)
-                    except Exception:
-                        pass
-
-            conf = int(sum(confs) / len(confs) * 100) if confs else 0
-
-            extracted.append({
-                "text": self._safe_text_join(texts),
-                "confidence": conf,
-                "engine": "paddleocr"
-            })
-
-        self._add_timing("extract_texts_from_predict_result", time.perf_counter() - t0)
-        return extracted
-
     def _ocr_paddle_batch(self, images: List, lang: str = "fr") -> List[Dict[str, Any]]:
         if not images:
             return []
@@ -707,7 +810,7 @@ class CarteGriseExtractor:
         with self._timer(f"paddle_predict_{lang}"):
             results = reader.predict(prepared)
 
-        return self._extract_texts_from_predict_result(results)
+        return self._extract_texts_from_predict_result(results, lang=lang)
 
     def _ocr_tesseract_zone(self, zone_img, field_name: str = "") -> Dict[str, Any]:
         t0 = time.perf_counter()

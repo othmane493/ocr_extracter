@@ -174,52 +174,165 @@ class CINExtractor(ABC):
         text = str(text).strip()
         return bool(re.fullmatch(r"[A-Za-z0-9\u0600-\u06FF\s\./-]+", text))
 
-    def _extract_texts_from_predict_result(self, results) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _poly_to_rect(poly) -> Optional[Dict[str, float]]:
+        try:
+            xs = [float(p[0]) for p in poly]
+            ys = [float(p[1]) for p in poly]
+            return {
+                "x1": min(xs),
+                "y1": min(ys),
+                "x2": max(xs),
+                "y2": max(ys),
+                "cx": (min(xs) + max(xs)) / 2.0,
+                "cy": (min(ys) + max(ys)) / 2.0,
+                "h": max(1.0, max(ys) - min(ys))
+            }
+        except Exception:
+            return None
+
+    def _join_paddle_tokens_in_reading_order(self, tokens: List[Dict[str, Any]], lang: str) -> str:
+        if not tokens:
+            return ""
+
+        tokens = [t for t in tokens if t.get("text")]
+        if not tokens:
+            return ""
+
+        avg_h = sum(float(t["rect"]["h"]) for t in tokens if t.get("rect")) / max(1, len(tokens))
+        line_tol = max(10.0, avg_h * 0.6)
+
+        tokens.sort(key=lambda t: (t["rect"]["cy"], t["rect"]["cx"]))
+
+        lines: List[List[Dict[str, Any]]] = []
+        for token in tokens:
+            placed = False
+            for line in lines:
+                line_cy = sum(float(x["rect"]["cy"]) for x in line) / len(line)
+                if abs(float(token["rect"]["cy"]) - line_cy) <= line_tol:
+                    line.append(token)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([token])
+
+        lines.sort(key=lambda line: min(float(t["rect"]["y1"]) for t in line))
+
+        line_texts = []
+        for line in lines:
+            reverse_x = (lang == "ar")
+            line.sort(key=lambda t: float(t["rect"]["cx"]), reverse=reverse_x)
+            text = " ".join(str(t["text"]).strip() for t in line if str(t["text"]).strip()).strip()
+            if text:
+                line_texts.append(text)
+
+        return " ".join(line_texts).strip()
+
+    def _extract_texts_from_predict_result(self, results, lang: str = "fr") -> List[Dict[str, Any]]:
         extracted = []
 
         for page in results:
-            texts = []
+            tokens = []
             confs = []
 
             if isinstance(page, dict):
-                for t in page.get("rec_texts", []):
-                    t = str(t).strip()
-                    if t:
-                        texts.append(t)
+                rec_texts = page.get("rec_texts", []) or []
+                rec_scores = page.get("rec_scores", []) or []
+                dt_polys = page.get("dt_polys", []) or []
 
-                for s in page.get("rec_scores", []):
+                for idx, raw_text in enumerate(rec_texts):
+                    text = str(raw_text).strip()
+                    if not text:
+                        continue
+
+                    rect = None
+                    if idx < len(dt_polys):
+                        rect = self._poly_to_rect(dt_polys[idx])
+
+                    tokens.append({
+                        "text": text,
+                        "rect": rect or {
+                            "x1": float(idx),
+                            "y1": 0.0,
+                            "x2": float(idx) + 1.0,
+                            "y2": 1.0,
+                            "cx": float(idx) + 0.5,
+                            "cy": 0.5,
+                            "h": 1.0
+                        }
+                    })
+
+                for s in rec_scores:
                     try:
                         confs.append(float(s))
                     except Exception:
                         pass
 
             elif hasattr(page, "rec_texts") or hasattr(page, "rec_scores"):
-                for t in getattr(page, "rec_texts", []):
-                    t = str(t).strip()
-                    if t:
-                        texts.append(t)
+                rec_texts = getattr(page, "rec_texts", []) or []
+                rec_scores = getattr(page, "rec_scores", []) or []
+                dt_polys = getattr(page, "dt_polys", []) or []
 
-                for s in getattr(page, "rec_scores", []):
+                for idx, raw_text in enumerate(rec_texts):
+                    text = str(raw_text).strip()
+                    if not text:
+                        continue
+
+                    rect = None
+                    if idx < len(dt_polys):
+                        rect = self._poly_to_rect(dt_polys[idx])
+
+                    tokens.append({
+                        "text": text,
+                        "rect": rect or {
+                            "x1": float(idx),
+                            "y1": 0.0,
+                            "x2": float(idx) + 1.0,
+                            "y2": 1.0,
+                            "cx": float(idx) + 0.5,
+                            "cy": 0.5,
+                            "h": 1.0
+                        }
+                    })
+
+                for s in rec_scores:
                     try:
                         confs.append(float(s))
                     except Exception:
                         pass
 
             elif isinstance(page, (list, tuple)):
-                for item in page:
+                for idx, item in enumerate(page):
                     try:
                         text = str(item[1][0]).strip()
                         score = float(item[1][1])
-                        if text:
-                            texts.append(text)
-                            confs.append(score)
+                        if not text:
+                            continue
+
+                        rect = None
+                        if item and item[0]:
+                            rect = self._poly_to_rect(item[0])
+
+                        tokens.append({
+                            "text": text,
+                            "rect": rect or {
+                                "x1": float(idx),
+                                "y1": 0.0,
+                                "x2": float(idx) + 1.0,
+                                "y2": 1.0,
+                                "cx": float(idx) + 0.5,
+                                "cy": 0.5,
+                                "h": 1.0
+                            }
+                        })
+                        confs.append(score)
                     except Exception:
                         pass
 
             conf = int(sum(confs) / len(confs) * 100) if confs else 0
 
             extracted.append({
-                "text": " ".join(texts).strip(),
+                "text": self._join_paddle_tokens_in_reading_order(tokens, lang=lang),
                 "confidence": conf,
                 "engine": "paddleocr"
             })
@@ -234,7 +347,7 @@ class CINExtractor(ABC):
                 return {"text": "", "confidence": 0, "engine": "paddleocr"}
 
             raw_result = reader.predict(zone)
-            extracted = self._extract_texts_from_predict_result(raw_result)
+            extracted = self._extract_texts_from_predict_result(raw_result, lang=lang)
 
             if not extracted:
                 return {"text": "", "confidence": 0, "engine": "paddleocr"}

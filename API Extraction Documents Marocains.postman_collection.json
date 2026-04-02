@@ -1,0 +1,68 @@
+{
+  "info": {
+    "_postman_id": "b9baf3eb-85d5-4b18-b0f7-39bfdc5c6014",
+    "name": "API Extraction Documents Marocains",
+    "description": "Collection pour tester l'API d'extraction de documents (CIN et Cartes Grises)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "15482935"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:5000/health",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "5000",
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Vérifie l'état de l'API"
+      },
+      "response": []
+    },
+    {
+      "name": "Extract OCR",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "description": "Image de la CIN ancienne",
+              "src": "/C:/Users/osebbata/Downloads/cin_images/cin_recto_3.jpeg"
+            },
+            {
+              "key": "document_type",
+              "value": "cin_old",
+              "type": "text",
+              "description": "Type de document"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:5000/extract",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "5000",
+          "path": [
+            "extract"
+          ]
+        },
+        "description": "Extrait les données d'une ancienne CIN"
+      },
+      "response": []
+    }
+  ]
+}

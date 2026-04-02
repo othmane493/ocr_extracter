@@ -1,17 +1,21 @@
-# Flask et dépendances web
-Flask==3.0.0
-Werkzeug==3.0.1
+# --- API (app.py) ---
+Flask>=3.0.0,<4
+Werkzeug>=3.0.0,<4
 
-# Vision et traitement d'image
-opencv-python>=4.8.0
-numpy>=1.24.0
-Pillow>=10.0.0
+# --- Vision & tableaux ---
+opencv-python>=4.9.0.80
+numpy>=1.26.0,<2.0
+Pillow>=10.2.0
 
-# OCR
+# --- OCR ---
 pytesseract>=0.3.10
-requests>=2.32.5
+# PaddleOCR (utilisé par ocr_manager, CIN, carte grise). Sur certaines plateformes,
+# installer paddlepaddle depuis la doc officielle si pip échoue.
+paddlepaddle>=2.6.0
+paddleocr>=2.7.0
 
-# Note: Tesseract OCR doit être installé sur le système
-# Ubuntu/Debian: sudo apt-get install tesseract-ocr tesseract-ocr-ara tesseract-ocr-fra
-# macOS: brew install tesseract tesseract-lang
-# Windows: https://github.com/UB-Mannheim/tesseract/wiki
+# --- Tests client HTTP ---
+requests>=2.31.0
+
+# --- Scripts outils / génération de templates (config/build_*.py, utils/ocr_utils) ---
+easyocr>=1.7.0
